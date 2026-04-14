@@ -1,0 +1,91 @@
+# Meeting Realtime Voice — Docker Compose
+#
+# Usage:
+#   docker compose up          # start all services
+#   docker compose up -d       # start in background
+#   docker compose logs -f app # follow app logs
+#   docker compose down        # stop all services
+#
+# First run will:
+#   1. Pull & start Ollama
+#   2. Auto-pull the configured LLM model
+#   3. Build & start the app
+#
+# Prerequisites:
+#   - Download ASR model locally first:
+#     huggingface-cli download Qwen/Qwen3-ASR-1.7B --local-dir ~/whisper-models/Qwen3-ASR-1.7B
+#   - Copy .env if needed:
+#     cp .env.example .env
+
+services:
+  # ── Ollama LLM Service ──────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mrv-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # GPU support (uncomment for NVIDIA):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── One-shot: pull LLM model ────────────────────────────
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: mrv-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen3.5:9b}"]
+    restart: "no"
+
+  # ── Main Application ────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mrv-app
+    ports:
+      - "${PORT:-8800}:8800"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Override settings for container networking
+      HOST: "0.0.0.0"
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      LOCAL_ONLY_MODE: "false"
+      # ASR_MODEL_PATH points to the mounted volume inside container
+      ASR_MODEL_PATH: "/models/${ASR_MODEL_DIR:-Qwen3-ASR-1.7B}"
+      # Disable preview ASR in Docker to halve memory usage (only final ASR runs)
+      DISABLE_PREVIEW_ASR: "true"
+    volumes:
+      # Mount ASR models (read-only)
+      - ${ASR_MODELS_HOST_PATH:-~/whisper-models}:/models:ro
+      # Persist recordings and database
+      - recordings:/app/recordings
+      - data:/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  recordings:
+  data:

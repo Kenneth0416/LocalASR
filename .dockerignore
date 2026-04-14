@@ -1,0 +1,39 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+venv
+.venv
+
+# Environment (keep .env.example)
+.env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Tests & CI
+tests/
+.github/
+
+# Reports & docs
+docs/
+*.md
+!README.md
+
+# Runtime data (mounted as volumes in Docker)
+recordings/
+data/
+
+# Dependencies stamp
+.deps_installed_*

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+server.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.deps_installed_*
+
+# Runtime data (recordings, database, etc.)
+recordings/
+data/
+
+# Research & thesis reports
+PERF_REPORT_*.md
+UX_PERF_REPORT_*.md
+THESIS_HIGHLIGHTS.md
+RESEARCH_REPORT.md
+VOICE_PIPELINE_ARCHITECTURE.md
+
+# Docs (if not needed in repo)
+# docs/
