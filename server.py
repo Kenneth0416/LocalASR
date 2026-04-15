@@ -48,6 +48,10 @@ logger = logging.getLogger("meeting.server")
 
 # Initialize services
 asr_service = ASRService(asr_config)
+# Legacy symbol kept for backward compatibility with tests that patch
+# preview_asr_service. Task 1 collapses runtime to a single ASR lane, so this
+# must never be used for runtime branching.
+preview_asr_service = None
 meeting_store = MeetingStore(server_config.database_path)
 session_manager = SessionManager(llm_config, meeting_config)
 session_manager.store = meeting_store

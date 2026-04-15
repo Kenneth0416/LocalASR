@@ -19,7 +19,7 @@ class RuntimeChecksTests(unittest.TestCase):
         clear=False,
     )
     def test_openai_api_key_alone_does_not_flip_local_only_provider(self):
-        llm, _, _, _, _, _ = load_config()
+        llm, _, _, _, _ = load_config()
         self.assertEqual(llm.provider, "ollama")
         self.assertTrue(llm.local_only)
 
@@ -33,7 +33,7 @@ class RuntimeChecksTests(unittest.TestCase):
         clear=False,
     )
     def test_localhost_openai_base_url_selects_openai_provider(self):
-        llm, _, _, _, _, _ = load_config()
+        llm, _, _, _, _ = load_config()
         self.assertEqual(llm.provider, "openai")
         self.assertEqual(llm.base_url, "http://127.0.0.1:8000/v1")
 
@@ -46,7 +46,7 @@ class RuntimeChecksTests(unittest.TestCase):
         clear=False,
     )
     def test_server_paths_are_normalized_to_project_root(self):
-        _, _, _, _, server, _ = load_config()
+        _, _, _, server, _ = load_config()
         project_root = Path(config.__file__).resolve().parent
         self.assertEqual(server.recordings_dir, str(project_root / "recordings"))
         self.assertEqual(server.database_path, str(project_root / "data/meeting_realtime_voice.sqlite3"))

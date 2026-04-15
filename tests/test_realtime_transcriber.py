@@ -38,6 +38,11 @@ class FakeRouter:
         self.preview_calls.append(audio_tuple)
         return next(self.preview_results)
 
+    async def transcribe_preview_streaming(self, audio_tuple):
+        # The runtime VAD transcriber prefers streaming preview. For tests, a
+        # single-shot preview result is sufficient and avoids duplicating setup.
+        yield await self.transcribe_preview(audio_tuple)
+
     async def transcribe_final(self, audio_tuple):
         self.final_calls.append(audio_tuple)
         return next(self.final_results)
@@ -52,6 +57,21 @@ class FakeVAD:
 
 
 class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
+    def _override_preview_timing(self, transcriber, *, preview_interval_sec: float, min_preview_audio_sec: float) -> None:
+        # Preview timing knobs were removed from WebRTCVADConfig as part of Task 1,
+        # but tests still need deterministic timings for preview emission.
+        transcriber._preview_interval_sec = float(preview_interval_sec)
+        transcriber._min_preview_audio_sec = float(min_preview_audio_sec)
+
+    async def _push_pcm_and_drain_previews(self, transcriber, pcm_chunk: bytes):
+        # Preview ASR runs in a background task. Yielding lets it run while the
+        # utterance is still active, so preview text can be used for fallbacks.
+        events = []
+        events.extend(await transcriber.push_pcm(pcm_chunk))
+        await asyncio.sleep(0)
+        events.extend(await transcriber.push_pcm(b""))
+        return events
+
     async def test_utterance_starts_at_first_speech_frame(self):
         router = FakeRouter(
             final_results=[LiteASRResult(text="定稿", duration_sec=0.08)],
@@ -63,16 +83,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 frame_ms=20,
                 enter_speech_frames=2,
                 endpoint_silence_frames=4,
-                preview_interval_sec=1.0,
-                min_preview_audio_sec=1.0,
                 max_utterance_sec=2.0,
             ),
             vad_factory=lambda aggressiveness: FakeVAD(decisions),
         )
+        self._override_preview_timing(transcriber, preview_interval_sec=1.0, min_preview_audio_sec=1.0)
 
         events = []
         for _ in range(len(decisions)):
-            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+            events.extend(await self._push_pcm_and_drain_previews(transcriber, make_pcm((0.02, 1800))))
         events.extend(await transcriber.flush())
 
         finals = [event for event in events if event.is_final]
@@ -98,16 +117,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 frame_ms=20,
                 enter_speech_frames=2,
                 endpoint_silence_frames=8,
-                preview_interval_sec=0.4,
-                min_preview_audio_sec=0.8,
                 max_utterance_sec=3.0,
             ),
             vad_factory=lambda aggressiveness: FakeVAD(decisions),
         )
+        self._override_preview_timing(transcriber, preview_interval_sec=0.4, min_preview_audio_sec=0.8)
 
         events = []
         for _ in range(len(decisions)):
-            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+            events.extend(await self._push_pcm_and_drain_previews(transcriber, make_pcm((0.02, 1800))))
         events.extend(await transcriber.flush())
 
         previews = [event for event in events if not event.is_final]
@@ -131,6 +149,9 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                     raise RuntimeError("preview model hiccup")
                 return LiteASRResult(text="预览恢复", duration_sec=1.0)
 
+            async def transcribe_preview_streaming(self, audio_tuple):
+                yield await self.transcribe_preview(audio_tuple)
+
             async def transcribe_final(self, _audio_tuple):
                 return LiteASRResult(text="最终定稿", duration_sec=1.4)
 
@@ -141,16 +162,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 frame_ms=20,
                 enter_speech_frames=2,
                 endpoint_silence_frames=4,
-                preview_interval_sec=0.4,
-                min_preview_audio_sec=0.8,
                 max_utterance_sec=3.0,
             ),
             vad_factory=lambda aggressiveness: FakeVAD(decisions),
         )
+        self._override_preview_timing(transcriber, preview_interval_sec=0.4, min_preview_audio_sec=0.8)
 
         events = []
         for _ in range(len(decisions)):
-            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+            events.extend(await self._push_pcm_and_drain_previews(transcriber, make_pcm((0.02, 1800))))
         events.extend(await transcriber.flush())
 
         finals = [event for event in events if event.is_final]
@@ -167,6 +187,9 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 self.preview_calls += 1
                 raise RuntimeError("preview model still down")
 
+            async def transcribe_preview_streaming(self, audio_tuple):
+                yield await self.transcribe_preview(audio_tuple)
+
             async def transcribe_final(self, _audio_tuple):
                 return LiteASRResult(text="最终定稿", duration_sec=1.4)
 
@@ -178,16 +201,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 frame_ms=20,
                 enter_speech_frames=2,
                 endpoint_silence_frames=4,
-                preview_interval_sec=0.4,
-                min_preview_audio_sec=0.8,
                 max_utterance_sec=4.0,
             ),
             vad_factory=lambda aggressiveness: FakeVAD(decisions),
         )
+        self._override_preview_timing(transcriber, preview_interval_sec=0.4, min_preview_audio_sec=0.8)
 
         events = []
         for _ in range(len(decisions)):
-            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+            events.extend(await self._push_pcm_and_drain_previews(transcriber, make_pcm((0.02, 1800))))
         events.extend(await transcriber.flush())
 
         finals = [event for event in events if event.is_final]
@@ -205,6 +227,9 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
             async def transcribe_preview(self, _audio_tuple):
                 return preview
 
+            async def transcribe_preview_streaming(self, audio_tuple):
+                yield await self.transcribe_preview(audio_tuple)
+
             async def transcribe_final(self, _audio_tuple):
                 if not hasattr(self, "called"):
                     self.called = 1
@@ -218,16 +243,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 frame_ms=20,
                 enter_speech_frames=2,
                 endpoint_silence_frames=8,
-                preview_interval_sec=0.4,
-                min_preview_audio_sec=0.8,
                 max_utterance_sec=3.0,
             ),
             vad_factory=lambda aggressiveness: FakeVAD(decisions),
         )
+        self._override_preview_timing(transcriber, preview_interval_sec=0.4, min_preview_audio_sec=0.8)
 
         events = []
         for _ in range(len(decisions)):
-            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+            events.extend(await self._push_pcm_and_drain_previews(transcriber, make_pcm((0.02, 1800))))
         self.assertEqual([event for event in events if event.is_final], [])
 
         final_1.set_result(LiteASRResult(text="第一句定稿。", duration_sec=1.5))
@@ -249,16 +273,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 frame_ms=20,
                 enter_speech_frames=2,
                 endpoint_silence_frames=8,
-                preview_interval_sec=0.4,
-                min_preview_audio_sec=0.8,
                 max_utterance_sec=3.0,
             ),
             vad_factory=lambda aggressiveness: FakeVAD(decisions),
         )
+        self._override_preview_timing(transcriber, preview_interval_sec=0.4, min_preview_audio_sec=0.8)
 
         events = []
         for _ in range(len(decisions)):
-            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+            events.extend(await self._push_pcm_and_drain_previews(transcriber, make_pcm((0.02, 1800))))
         events.extend(await transcriber.flush())
 
         finals = [event for event in events if event.is_final]
@@ -271,6 +294,9 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
             async def transcribe_preview(self, _audio_tuple):
                 return LiteASRResult(text="异常时保留", duration_sec=0.8)
 
+            async def transcribe_preview_streaming(self, audio_tuple):
+                yield await self.transcribe_preview(audio_tuple)
+
             async def transcribe_final(self, _audio_tuple):
                 raise RuntimeError("final model failed")
 
@@ -281,16 +307,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 frame_ms=20,
                 enter_speech_frames=2,
                 endpoint_silence_frames=4,
-                preview_interval_sec=0.4,
-                min_preview_audio_sec=0.8,
                 max_utterance_sec=3.0,
             ),
             vad_factory=lambda aggressiveness: FakeVAD(decisions),
         )
+        self._override_preview_timing(transcriber, preview_interval_sec=0.4, min_preview_audio_sec=0.8)
 
         events = []
         for _ in range(len(decisions)):
-            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+            events.extend(await self._push_pcm_and_drain_previews(transcriber, make_pcm((0.02, 1800))))
         events.extend(await transcriber.flush())
 
         finals = [event for event in events if event.is_final]
@@ -303,6 +328,9 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
             async def transcribe_preview(self, _audio_tuple):
                 return LiteASRResult(text="单帧尾巴", duration_sec=0.02)
 
+            async def transcribe_preview_streaming(self, audio_tuple):
+                yield await self.transcribe_preview(audio_tuple)
+
             async def transcribe_final(self, _audio_tuple):
                 return LiteASRResult(text="单帧尾巴", duration_sec=0.02)
 
@@ -313,16 +341,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
                 frame_ms=20,
                 enter_speech_frames=2,
                 endpoint_silence_frames=4,
-                preview_interval_sec=0.4,
-                min_preview_audio_sec=0.8,
                 max_utterance_sec=3.0,
             ),
             vad_factory=lambda aggressiveness: FakeVAD(decisions),
         )
+        self._override_preview_timing(transcriber, preview_interval_sec=0.4, min_preview_audio_sec=0.8)
 
         events = []
         for _ in range(len(decisions)):
-            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+            events.extend(await self._push_pcm_and_drain_previews(transcriber, make_pcm((0.02, 1800))))
         events.extend(await transcriber.flush(reason="flush"))
 
         finals = [event for event in events if event.is_final]
