@@ -167,6 +167,34 @@ class ServerEndpointTests(unittest.TestCase):
         self.assertEqual(payload["llm_status"], "ok")
         self.assertEqual(payload["runtime"], fake_runtime_snapshot.to_dict())
 
+    def test_readiness_is_not_gated_by_preview_enabled(self):
+        fake_asr = make_fake_asr(initialized=True)
+        fake_preview_asr = make_fake_asr(initialized=True)
+        fake_runtime_snapshot = make_runtime_snapshot("readiness-preview-disabled")
+
+        # This must remain OK even if preview_enabled is False; old logic would
+        # have degraded readiness based on preview_enabled.
+        forced_asr_status = {
+            "state": "ready",
+            "error": None,
+            "preview_enabled": False,
+        }
+
+        with patch.object(server, "asr_service", fake_asr), \
+             patch.object(server, "preview_asr_service", fake_preview_asr, create=True), \
+             patch.object(server, "get_asr_status", return_value=forced_asr_status), \
+             patch.object(server, "get_llm_status", return_value="ok"), \
+             patch.object(server, "refresh_runtime_snapshot", return_value=fake_runtime_snapshot, create=True), \
+             patch.object(server, "is_readiness_snapshot_healthy", return_value=True):
+            with TestClient(server.app) as client:
+                response = client.get("/api/readiness")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["asr"]["state"], "ready")
+        self.assertFalse(payload["asr"]["preview_enabled"])
+
     def test_readiness_endpoint_degrades_when_local_llm_is_blocked_even_if_probe_is_ok(self):
         fake_asr = make_fake_asr(initialized=True)
         fake_preview_asr = make_fake_asr(initialized=True)

@@ -115,15 +115,10 @@ class WebRTCVADConfig:
     frame_ms: int = 20
     vad_aggressiveness: int = 2
     enter_speech_frames: int = 2
-    endpoint_silence_frames: int = 36  # 720ms silence to end utterance (was 18)
+    endpoint_silence_frames: int = 18
     max_utterance_sec: float = 18.0
     pre_roll_sec: float = 0.2
     min_final_audio_sec: float = 0.1
-    # NOTE: Preview timing knobs were removed as part of the rollback to a
-    # single realtime ASR lane. Some runtime code still emits preview events,
-    # so we provide backward-compatible defaults via __getattr__.
-    _preview_interval_sec_default: float = field(default=1.2, init=False, repr=False)
-    _min_preview_audio_sec_default: float = field(default=0.8, init=False, repr=False)
 
     def __post_init__(self):
         self.frame_ms = int(self.frame_ms)
@@ -148,14 +143,6 @@ class WebRTCVADConfig:
             raise ValueError("pre_roll_sec must be >= 0")
         if self.min_final_audio_sec < 0:
             raise ValueError("min_final_audio_sec must be >= 0")
-
-    def __getattr__(self, name: str):
-        # Backward compatibility for code that still references preview timing.
-        if name == "preview_interval_sec":
-            return float(self._preview_interval_sec_default)
-        if name == "min_preview_audio_sec":
-            return float(self._min_preview_audio_sec_default)
-        raise AttributeError(name)
 
 @dataclass
 class ServerConfig:
@@ -249,7 +236,7 @@ def _build_webrtc_vad_config() -> WebRTCVADConfig:
         frame_ms=int(_env("WEBRTC_VAD_FRAME_MS", "20")),
         vad_aggressiveness=int(_env("WEBRTC_VAD_AGGRESSIVENESS", "2")),
         enter_speech_frames=int(_env("WEBRTC_VAD_ENTER_SPEECH_FRAMES", "2")),
-        endpoint_silence_frames=int(_env("WEBRTC_VAD_ENDPOINT_SILENCE_FRAMES", "36")),
+        endpoint_silence_frames=int(_env("WEBRTC_VAD_ENDPOINT_SILENCE_FRAMES", "18")),
         max_utterance_sec=float(_env("WEBRTC_VAD_MAX_UTTERANCE_SEC", "18.0")),
         pre_roll_sec=float(_env("WEBRTC_VAD_PRE_ROLL_SEC", "0.2")),
         min_final_audio_sec=float(_env("WEBRTC_VAD_MIN_FINAL_AUDIO_SEC", "0.1")),
