@@ -28,6 +28,7 @@ from fastapi import Body, HTTPException
 from asr import (
     ASRService,
     FinalOnlyASRRouter,
+    PreviewFinalASRRouter,
     RealtimeTranscriptEvent,
     WebRTCVADMeetingTranscriber,
 )
@@ -82,8 +83,13 @@ def build_transformer_chunking_config(config):
 
 
 def build_realtime_transcriber(session_state: dict) -> WebRTCVADMeetingTranscriber:
-    """Build the realtime VAD transcriber with a single ASR router."""
-    router = FinalOnlyASRRouter(
+    """Build the realtime VAD transcriber with preview/final routing.
+
+    Task 1 collapses runtime ASR to a single service, but keeps realtime preview
+    behavior stable by routing both preview and final through the same service.
+    """
+    router = PreviewFinalASRRouter(
+        asr_service,
         asr_service,
         language_getter=lambda: session_state.get("language"),
         context_getter=lambda: session_state.get("asr_prompt"),

@@ -266,6 +266,28 @@ class ServerEndpointTests(unittest.TestCase):
         fake_asr.initialize.assert_awaited_once()
         self.assertEqual(events, ["initialize", "refresh"])
 
+    def test_build_realtime_transcriber_reuses_single_asr_service_for_preview_and_final(self):
+        fake_router = object()
+        fake_transcriber = object()
+
+        with patch.object(server, "PreviewFinalASRRouter", return_value=fake_router) as preview_router, \
+             patch.object(server, "FinalOnlyASRRouter") as final_only_router, \
+             patch.object(server, "WebRTCVADMeetingTranscriber", return_value=fake_transcriber) as transcriber_ctor:
+            result = server.build_realtime_transcriber({"language": "zh", "asr_prompt": "ctx"})
+
+        self.assertIs(result, fake_transcriber)
+        preview_router.assert_called_once()
+        args, kwargs = preview_router.call_args
+        self.assertIs(args[0], server.asr_service)
+        self.assertIs(args[1], server.asr_service)
+        final_only_router.assert_not_called()
+
+        transcriber_ctor.assert_called_once()
+        _, tkwargs = transcriber_ctor.call_args
+        self.assertIs(tkwargs["router"], fake_router)
+        self.assertEqual(tkwargs["sample_rate"], server.asr_config.sample_rate)
+        self.assertIs(tkwargs["config"], server.realtime_vad_config)
+
     def test_startup_event_initializes_single_asr_service(self):
         fake_final_asr = make_fake_asr(initialized=False)
         fake_preview_asr = make_fake_asr(initialized=False)
