@@ -115,20 +115,21 @@ class WebRTCVADConfig:
     frame_ms: int = 20
     vad_aggressiveness: int = 2
     enter_speech_frames: int = 2
-    endpoint_silence_frames: int = 18
-    preview_interval_sec: float = 1.2
-    min_preview_audio_sec: float = 0.8
+    endpoint_silence_frames: int = 36  # 720ms silence to end utterance (was 18)
     max_utterance_sec: float = 18.0
     pre_roll_sec: float = 0.2
     min_final_audio_sec: float = 0.1
+    # NOTE: Preview timing knobs were removed as part of the rollback to a
+    # single realtime ASR lane. Some runtime code still emits preview events,
+    # so we provide backward-compatible defaults via __getattr__.
+    _preview_interval_sec_default: float = field(default=1.2, init=False, repr=False)
+    _min_preview_audio_sec_default: float = field(default=0.8, init=False, repr=False)
 
     def __post_init__(self):
         self.frame_ms = int(self.frame_ms)
         self.vad_aggressiveness = int(self.vad_aggressiveness)
         self.enter_speech_frames = int(self.enter_speech_frames)
         self.endpoint_silence_frames = int(self.endpoint_silence_frames)
-        self.preview_interval_sec = float(self.preview_interval_sec)
-        self.min_preview_audio_sec = float(self.min_preview_audio_sec)
         self.max_utterance_sec = float(self.max_utterance_sec)
         self.pre_roll_sec = float(self.pre_roll_sec)
         self.min_final_audio_sec = float(self.min_final_audio_sec)
@@ -141,10 +142,6 @@ class WebRTCVADConfig:
             raise ValueError("enter_speech_frames must be > 0")
         if self.endpoint_silence_frames <= 0:
             raise ValueError("endpoint_silence_frames must be > 0")
-        if self.preview_interval_sec <= 0:
-            raise ValueError("preview_interval_sec must be > 0")
-        if self.min_preview_audio_sec < 0:
-            raise ValueError("min_preview_audio_sec must be >= 0")
         if self.max_utterance_sec <= 0:
             raise ValueError("max_utterance_sec must be > 0")
         if self.pre_roll_sec < 0:
@@ -152,6 +149,13 @@ class WebRTCVADConfig:
         if self.min_final_audio_sec < 0:
             raise ValueError("min_final_audio_sec must be >= 0")
 
+    def __getattr__(self, name: str):
+        # Backward compatibility for code that still references preview timing.
+        if name == "preview_interval_sec":
+            return float(self._preview_interval_sec_default)
+        if name == "min_preview_audio_sec":
+            return float(self._min_preview_audio_sec_default)
+        raise AttributeError(name)
 
 @dataclass
 class ServerConfig:
@@ -240,45 +244,19 @@ def _build_asr_config() -> ASRConfig:
     return _build_final_asr_config()
 
 
-def _build_preview_asr_config(final_config: ASRConfig) -> ASRConfig:
-    return ASRConfig(
-        model_path=_env("PREVIEW_ASR_MODEL_PATH", os.path.expanduser("~/whisper-models/Qwen3-ASR-0.6B")),
-        aligner_path="",
-        aligner_backend=final_config.aligner_backend,
-        language=_env("PREVIEW_ASR_LANGUAGE", final_config.language),
-        device=_env("PREVIEW_ASR_DEVICE", final_config.device),
-        init_timeout_sec=float(_env("PREVIEW_ASR_INIT_TIMEOUT_SEC", str(final_config.init_timeout_sec))),
-        max_inference_batch_size=int(_env("PREVIEW_ASR_MAX_INFERENCE_BATCH_SIZE", "8")),
-        max_new_tokens=int(_env("PREVIEW_ASR_MAX_NEW_TOKENS", "128")),
-        attn_implementation=_env("PREVIEW_ASR_ATTN_IMPLEMENTATION", final_config.attn_implementation),
-        sample_rate=final_config.sample_rate,
-        min_chunk_sec=final_config.min_chunk_sec,
-        preferred_chunk_sec=final_config.preferred_chunk_sec,
-        max_chunk_sec=final_config.max_chunk_sec,
-        overlap_sec=final_config.overlap_sec,
-        endpoint_silence_sec=final_config.endpoint_silence_sec,
-        boundary_search_sec=final_config.boundary_search_sec,
-        semantic_pause_sec=final_config.semantic_pause_sec,
-        semantic_soft_pause_sec=final_config.semantic_soft_pause_sec,
-        semantic_force_commit_sec=final_config.semantic_force_commit_sec,
-    )
-
-
 def _build_webrtc_vad_config() -> WebRTCVADConfig:
     return WebRTCVADConfig(
         frame_ms=int(_env("WEBRTC_VAD_FRAME_MS", "20")),
         vad_aggressiveness=int(_env("WEBRTC_VAD_AGGRESSIVENESS", "2")),
         enter_speech_frames=int(_env("WEBRTC_VAD_ENTER_SPEECH_FRAMES", "2")),
-        endpoint_silence_frames=int(_env("WEBRTC_VAD_ENDPOINT_SILENCE_FRAMES", "18")),
-        preview_interval_sec=float(_env("WEBRTC_VAD_PREVIEW_INTERVAL_SEC", "1.2")),
-        min_preview_audio_sec=float(_env("WEBRTC_VAD_MIN_PREVIEW_AUDIO_SEC", "0.8")),
+        endpoint_silence_frames=int(_env("WEBRTC_VAD_ENDPOINT_SILENCE_FRAMES", "36")),
         max_utterance_sec=float(_env("WEBRTC_VAD_MAX_UTTERANCE_SEC", "18.0")),
         pre_roll_sec=float(_env("WEBRTC_VAD_PRE_ROLL_SEC", "0.2")),
         min_final_audio_sec=float(_env("WEBRTC_VAD_MIN_FINAL_AUDIO_SEC", "0.1")),
     )
 
 
-def load_config() -> tuple[LLMConfig, ASRConfig, ASRConfig, WebRTCVADConfig, ServerConfig, MeetingConfig]:
+def load_config() -> tuple[LLMConfig, ASRConfig, WebRTCVADConfig, ServerConfig, MeetingConfig]:
     """Load all configuration from environment variables."""
 
     local_only = _env_bool("LOCAL_ONLY_MODE", True)
@@ -301,7 +279,6 @@ def load_config() -> tuple[LLMConfig, ASRConfig, ASRConfig, WebRTCVADConfig, Ser
     )
 
     asr = _build_final_asr_config()
-    preview_asr = _build_preview_asr_config(asr)
     realtime_vad = _build_webrtc_vad_config()
 
     server = ServerConfig(
@@ -325,4 +302,4 @@ def load_config() -> tuple[LLMConfig, ASRConfig, ASRConfig, WebRTCVADConfig, Ser
         summary_interval_turns=int(os.getenv("SUMMARY_INTERVAL_TURNS", "30")),
     )
 
-    return llm, asr, preview_asr, realtime_vad, server, meeting
+    return llm, asr, realtime_vad, server, meeting
