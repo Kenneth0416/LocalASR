@@ -520,8 +520,8 @@ async def run_utterance(
     # preview_ASR_latency = first preview latency sampled by the router
     ttft_ms: Optional[float] = None
     if had_preview and router.preview_latencies_ms:
-        first_preview_asr_ms = router.preview_latencies_ms[0]
-        ttft_ms = accumulation_ms + first_preview_asr_ms
+        first_partial_latency_ms = router.preview_latencies_ms[0]
+        ttft_ms = accumulation_ms + first_partial_latency_ms
 
     # ── Endpoint latency (from last word to settled final text) ─────────────
     # In real-time: 360ms silence window + final ASR latency

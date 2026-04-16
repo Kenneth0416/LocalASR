@@ -279,12 +279,10 @@ class ServerEndpointTests(unittest.TestCase):
         self.assertTrue(payload["asr_ready"])
         self.assertEqual(payload["asr_state"], "ready")
         self.assertEqual(payload["asr_model"], str(server.asr_config.model_path))
-        self.assertNotIn("final_asr_state", payload)
-        self.assertNotIn("preview_asr_state", payload)
-        self.assertNotIn("final_asr_model", payload)
-        self.assertNotIn("preview_asr_model", payload)
+        self.assertEqual(sorted(key for key in payload if key.endswith("asr_state")), ["asr_state"])
+        self.assertEqual(sorted(key for key in payload if key.endswith("asr_model")), ["asr_model"])
 
-    def test_websocket_ready_payload_omits_preview_metadata(self):
+    def test_websocket_ready_payload_exposes_single_asr_metadata(self):
         fake_asr = make_fake_asr(initialized=True)
         fake_transcriber = make_fake_realtime_transcriber()
         startup_runtime_snapshot = make_runtime_snapshot("startup")
@@ -325,10 +323,8 @@ class ServerEndpointTests(unittest.TestCase):
                         self.assertEqual(ready["type"], "ready")
                         self.assertEqual(ready["asr_model"], str(server.asr_config.model_path))
                         self.assertEqual(ready["asr_state"], "ready")
-                        self.assertNotIn("final_asr_model", ready)
-                        self.assertNotIn("preview_asr_model", ready)
-                        self.assertNotIn("final_asr_state", ready)
-                        self.assertNotIn("preview_asr_state", ready)
+                        self.assertEqual(sorted(key for key in ready if key.endswith("asr_model")), ["asr_model"])
+                        self.assertEqual(sorted(key for key in ready if key.endswith("asr_state")), ["asr_state"])
                         self.assertEqual(ready["runtime"], websocket_runtime_snapshot.to_dict())
                         self.assertEqual(refresh_runtime_snapshot.call_count, 2)
                         self.assertEqual(llm_status_calls, ["startup-ok", "startup-ok"])

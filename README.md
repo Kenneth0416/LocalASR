@@ -126,21 +126,12 @@ ASR_ATTN_IMPLEMENTATION=auto
 ASR_INIT_TIMEOUT_SEC=240
 ```
 
-### Realtime Preview/Final Split
+### Realtime ASR
 
-- realtime preview uses `PREVIEW_ASR_MODEL_PATH` and is intended for low-latency partial text
-- finalized transcript segments use `ASR_MODEL_PATH`
-- preview output is not persisted to meeting history
-- finalized output is the only source for meeting summary and QA context
-
-### Rollout Note
-
-The realtime transcript UI is compatible with both:
-
-- final-only realtime transcript events
-- preview + final transcript events that share a stable `segment_id`
-
-This allows a staged backend rollout without breaking the frontend.
+- realtime mode uses WebRTC VAD to segment live audio into utterances
+- each utterance is transcribed once through `ASR_MODEL_PATH`
+- only final transcript segments are shown in the live UI and persisted to meeting history
+- summary generation and meeting QA remain grounded on persisted final transcript segments
 
 ## API
 
@@ -176,9 +167,6 @@ This allows a staged backend rollout without breaking the frontend.
 # 1. 下载 ASR 模型（首次需要）
 pip install huggingface_hub
 huggingface-cli download Qwen/Qwen3-ASR-1.7B --local-dir ~/whisper-models/Qwen3-ASR-1.7B
-
-# 可选：下载 preview 模型（低延迟实时预览）
-huggingface-cli download Qwen/Qwen3-ASR-0.6B --local-dir ~/whisper-models/Qwen3-ASR-0.6B
 
 # 2. 配置环境变量（可选，默认配置即可运行）
 cp .env.example .env
