@@ -385,20 +385,14 @@ async def audio_worker(
                     audio_recorder.append_pcm(pcm_chunk)
                     events = await transcriber.push_pcm(pcm_chunk)
                     for event in events:
-                        if event.is_final:
-                            await emit_final_transcript_segment(session, event, websocket)
-                        else:
-                            await emit_preview_transcript_segment(session, event, websocket)
+                        await emit_final_transcript_segment(session, event, websocket)
                         await send_transcribe_done(websocket, event)
                     continue
 
                 if item.event_type == "eos":
                     events = await transcriber.flush(reason=item.reason)
                     for event in events:
-                        if event.is_final:
-                            await emit_final_transcript_segment(session, event, websocket)
-                        else:
-                            await emit_preview_transcript_segment(session, event, websocket)
+                        await emit_final_transcript_segment(session, event, websocket)
                         await send_transcribe_done(websocket, event)
 
                     recording_path = audio_recorder.finalize()
@@ -433,62 +427,18 @@ async def send_transcribe_done(websocket: WebSocket, event: RealtimeTranscriptEv
     await websocket.send_json({
         "type": "transcribe_done",
         "processing_time": event.processing_time,
-        "phase": event.event_type,
+        "phase": "final",
         "segment_id": event.segment_id,
         "revision": event.revision,
-        "is_final": event.is_final,
+        "is_final": True,
         "cut_reason": event.cut_reason,
     })
-
-
-async def emit_preview_transcript_segment(session, event: RealtimeTranscriptEvent, websocket: WebSocket):
-    """Broadcast a preview transcript update without persistence."""
-    try:
-        text = event.text.strip()
-        if not text:
-            return
-
-        segment, accepted = session.upsert_live_preview_segment(
-            event.segment_id,
-            event.revision,
-            speaker="发言人",
-            text=text,
-            start_time=event.start_time,
-            end_time=event.end_time,
-        )
-        if not accepted:
-            return
-
-        await websocket.send_json({
-            "type": "transcript",
-            "segment": {
-                "id": "",
-                "segment_id": event.segment_id,
-                "revision": event.revision,
-                "is_final": event.is_final,
-                "cut_reason": event.cut_reason,
-                "speaker": segment.speaker,
-                "text": segment.text,
-                "start": segment.start_time,
-                "end": segment.end_time,
-            },
-            "total_segments": len(session.transcript),
-            "processing_time": event.processing_time,
-        })
-    except Exception as e:
-        logger.error("Audio preview processing error: %s", e)
-        await websocket.send_json({
-            "type": "error",
-            "message": f"转写失败: {str(e)}"
-        })
-
 
 async def emit_final_transcript_segment(session, event: RealtimeTranscriptEvent, websocket: WebSocket):
     """Persist and broadcast a finalized transcript emission."""
     meeting_config = sys.modules["server"].meeting_config
 
     try:
-        session.clear_live_preview_segment(event.segment_id)
         text = event.text.strip()
         if not text:
             return

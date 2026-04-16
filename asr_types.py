@@ -2,7 +2,6 @@
 ASR shared types - dataclasses used across all modules.
 """
 
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -43,8 +42,8 @@ class LiteASRResult:
 
 @dataclass(frozen=True)
 class RealtimeTranscriptEvent:
-    """A realtime transcript update emitted by the streaming flow."""
-    event_type: str  # "preview" or "final"
+    """A finalized realtime transcript emitted by the VAD flow."""
+    event_type: str
     text: str
     start_time: float
     end_time: float
@@ -52,7 +51,7 @@ class RealtimeTranscriptEvent:
     segment_id: int
     revision: int
     is_final: bool
-    cut_reason: str = "preview"
+    cut_reason: str = "endpoint"
 
 
 @dataclass(frozen=True)
@@ -100,12 +99,8 @@ class UtteranceState:
     end_sample: int | None
     last_speech_sample: int
     pcm_buffer: bytearray = field(default_factory=bytearray)
-    first_preview_emitted: bool = False
-    last_preview_sample: int = 0
     sealed: bool = False
     final_task: Optional["asyncio.Task"] = None
-    preview_task: Optional["asyncio.Task"] = None
-    last_non_empty_preview_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -230,21 +225,8 @@ class TransformerChunkingConfig:
 
 
 class BaseASRRouter:
-    """Interface that all ASR routers must implement."""
-
-    async def transcribe_preview(self, audio_tuple) -> LiteASRResult:
-        """Transcribe for realtime preview display."""
-        raise NotImplementedError
+    """Interface that realtime ASR routers must implement."""
 
     async def transcribe_final(self, audio_tuple) -> LiteASRResult:
         """Transcribe for final committed transcript."""
         raise NotImplementedError
-
-    async def transcribe_preview_streaming(self, audio_tuple) -> AsyncIterator[LiteASRResult]:
-        """Async generator yielding partial preview results token-by-token.
-
-        Default implementation falls back to a single non-streaming call.
-        Subclasses override this to provide true token-level streaming.
-        """
-        result = await self.transcribe_preview(audio_tuple)
-        yield result

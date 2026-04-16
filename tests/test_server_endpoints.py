@@ -99,7 +99,6 @@ class ServerEndpointTests(unittest.TestCase):
 
     def test_health_endpoint_returns_local_process_status(self):
         fake_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
         startup_runtime_snapshot = make_runtime_snapshot("startup")
         health_runtime_snapshot = make_runtime_snapshot("health-fresh")
         stale_runtime_snapshot = make_runtime_snapshot("health-stale")
@@ -114,7 +113,7 @@ class ServerEndpointTests(unittest.TestCase):
             return health_runtime_snapshot
 
         try:
-            with patch.object(server, "asr_service", fake_asr), patch.object(server, "preview_asr_service", fake_preview_asr, create=True), patch.object(
+            with patch.object(server, "asr_service", fake_asr), patch.object(
                 server,
                 "get_llm_status",
                 side_effect=["startup-ok", AssertionError("health should not probe llm")],
@@ -143,9 +142,8 @@ class ServerEndpointTests(unittest.TestCase):
 
     def test_sessions_endpoint_is_hidden_by_default(self):
         fake_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
 
-        with patch.object(server, "asr_service", fake_asr), patch.object(server, "preview_asr_service", fake_preview_asr, create=True):
+        with patch.object(server, "asr_service", fake_asr):
             with TestClient(server.app) as client:
                 response = client.get("/api/sessions")
 
@@ -153,10 +151,9 @@ class ServerEndpointTests(unittest.TestCase):
 
     def test_readiness_endpoint_surfaces_dependency_state(self):
         fake_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
         fake_runtime_snapshot = make_runtime_snapshot("readiness")
 
-        with patch.object(server, "asr_service", fake_asr), patch.object(server, "preview_asr_service", fake_preview_asr, create=True), patch.object(server, "get_llm_status", return_value="ok"), patch.object(server, "refresh_runtime_snapshot", return_value=fake_runtime_snapshot, create=True):
+        with patch.object(server, "asr_service", fake_asr), patch.object(server, "get_llm_status", return_value="ok"), patch.object(server, "refresh_runtime_snapshot", return_value=fake_runtime_snapshot, create=True):
             with TestClient(server.app) as client:
                 response = client.get("/api/readiness")
 
@@ -167,37 +164,8 @@ class ServerEndpointTests(unittest.TestCase):
         self.assertEqual(payload["llm_status"], "ok")
         self.assertEqual(payload["runtime"], fake_runtime_snapshot.to_dict())
 
-    def test_readiness_is_not_gated_by_preview_enabled(self):
-        fake_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
-        fake_runtime_snapshot = make_runtime_snapshot("readiness-preview-disabled")
-
-        # This must remain OK even if preview_enabled is False; old logic would
-        # have degraded readiness based on preview_enabled.
-        forced_asr_status = {
-            "state": "ready",
-            "error": None,
-            "preview_enabled": False,
-        }
-
-        with patch.object(server, "asr_service", fake_asr), \
-             patch.object(server, "preview_asr_service", fake_preview_asr, create=True), \
-             patch.object(server, "get_asr_status", return_value=forced_asr_status), \
-             patch.object(server, "get_llm_status", return_value="ok"), \
-             patch.object(server, "refresh_runtime_snapshot", return_value=fake_runtime_snapshot, create=True), \
-             patch.object(server, "is_readiness_snapshot_healthy", return_value=True):
-            with TestClient(server.app) as client:
-                response = client.get("/api/readiness")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["asr"]["state"], "ready")
-        self.assertFalse(payload["asr"]["preview_enabled"])
-
     def test_readiness_endpoint_degrades_when_local_llm_is_blocked_even_if_probe_is_ok(self):
         fake_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
         blocked_runtime_snapshot = SimpleNamespace(
             warnings=["blocked"],
             capabilities={
@@ -217,7 +185,7 @@ class ServerEndpointTests(unittest.TestCase):
             },
         )
 
-        with patch.object(server, "asr_service", fake_asr), patch.object(server, "preview_asr_service", fake_preview_asr, create=True), patch.object(server, "get_llm_status", return_value="ok"), patch.object(server, "refresh_runtime_snapshot", return_value=blocked_runtime_snapshot, create=True):
+        with patch.object(server, "asr_service", fake_asr), patch.object(server, "get_llm_status", return_value="ok"), patch.object(server, "refresh_runtime_snapshot", return_value=blocked_runtime_snapshot, create=True):
             with TestClient(server.app) as client:
                 response = client.get("/api/readiness")
 
@@ -230,11 +198,10 @@ class ServerEndpointTests(unittest.TestCase):
 
     def test_readiness_endpoint_degrades_when_asr_is_idle(self):
         fake_asr = make_fake_asr(initialized=False)
-        fake_preview_asr = make_fake_asr(initialized=True)
         fake_asr.initialization_state = lambda: "idle"
         fake_asr.initialization_error = lambda: None
 
-        with patch.object(server, "asr_service", fake_asr), patch.object(server, "preview_asr_service", fake_preview_asr, create=True), patch.object(server, "get_llm_status", return_value="ok"):
+        with patch.object(server, "asr_service", fake_asr), patch.object(server, "get_llm_status", return_value="ok"):
             with TestClient(server.app) as client:
                 response = client.get("/api/readiness")
 
@@ -246,7 +213,6 @@ class ServerEndpointTests(unittest.TestCase):
 
     def test_startup_event_runs_asr_initialize(self):
         fake_asr = make_fake_asr(initialized=False)
-        fake_preview_asr = make_fake_asr(initialized=True)
         fake_runtime_snapshot = make_runtime_snapshot("startup")
         events: list[str] = []
 
@@ -259,28 +225,25 @@ class ServerEndpointTests(unittest.TestCase):
 
         fake_asr.initialize = AsyncMock(side_effect=initialize_side_effect)
 
-        with patch.object(server, "asr_service", fake_asr), patch.object(server, "preview_asr_service", fake_preview_asr, create=True), patch.object(server, "get_llm_status", return_value="ok"), patch.object(server, "refresh_runtime_snapshot", side_effect=refresh_side_effect, create=True):
+        with patch.object(server, "asr_service", fake_asr), patch.object(server, "get_llm_status", return_value="ok"), patch.object(server, "refresh_runtime_snapshot", side_effect=refresh_side_effect, create=True):
             with TestClient(server.app):
                 pass
 
         fake_asr.initialize.assert_awaited_once()
         self.assertEqual(events, ["initialize", "refresh"])
 
-    def test_build_realtime_transcriber_reuses_single_asr_service_for_preview_and_final(self):
+    def test_build_realtime_transcriber_uses_final_only_router(self):
         fake_router = object()
         fake_transcriber = object()
 
-        with patch.object(server, "PreviewFinalASRRouter", return_value=fake_router) as preview_router, \
-             patch.object(server, "FinalOnlyASRRouter") as final_only_router, \
+        with patch.object(server, "FinalOnlyASRRouter", return_value=fake_router) as final_only_router, \
              patch.object(server, "WebRTCVADMeetingTranscriber", return_value=fake_transcriber) as transcriber_ctor:
             result = server.build_realtime_transcriber({"language": "zh", "asr_prompt": "ctx"})
 
         self.assertIs(result, fake_transcriber)
-        preview_router.assert_called_once()
-        args, kwargs = preview_router.call_args
+        final_only_router.assert_called_once()
+        args, kwargs = final_only_router.call_args
         self.assertIs(args[0], server.asr_service)
-        self.assertIs(args[1], server.asr_service)
-        final_only_router.assert_not_called()
 
         transcriber_ctor.assert_called_once()
         _, tkwargs = transcriber_ctor.call_args
@@ -290,30 +253,23 @@ class ServerEndpointTests(unittest.TestCase):
 
     def test_startup_event_initializes_single_asr_service(self):
         fake_final_asr = make_fake_asr(initialized=False)
-        fake_preview_asr = make_fake_asr(initialized=False)
         fake_runtime_snapshot = make_runtime_snapshot("startup-single")
 
         with patch.object(server, "asr_service", fake_final_asr), \
-             patch.object(server, "preview_asr_service", fake_preview_asr, create=True), \
              patch.object(server, "get_llm_status", return_value="ok"), \
              patch.object(server, "refresh_runtime_snapshot", return_value=fake_runtime_snapshot, create=True):
             with TestClient(server.app):
                 pass
 
         fake_final_asr.initialize.assert_awaited_once()
-        fake_preview_asr.initialize.assert_not_awaited()
 
     def test_health_endpoint_surfaces_single_asr_metadata(self):
         fake_final_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
         fake_final_asr.initialization_state = lambda: "ready"
         fake_final_asr.initialization_error = lambda: None
-        fake_preview_asr.initialization_state = lambda: "ready"
-        fake_preview_asr.initialization_error = lambda: None
         fake_runtime_snapshot = make_runtime_snapshot("health-single")
 
         with patch.object(server, "asr_service", fake_final_asr), \
-             patch.object(server, "preview_asr_service", fake_preview_asr, create=True), \
              patch.object(server, "refresh_runtime_snapshot", return_value=fake_runtime_snapshot, create=True):
             with TestClient(server.app) as client:
                 response = client.get("/api/health")
@@ -327,11 +283,9 @@ class ServerEndpointTests(unittest.TestCase):
         self.assertNotIn("preview_asr_state", payload)
         self.assertNotIn("final_asr_model", payload)
         self.assertNotIn("preview_asr_model", payload)
-        self.assertNotIn("preview_enabled", payload)
 
     def test_websocket_ready_payload_omits_preview_metadata(self):
         fake_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
         fake_transcriber = make_fake_realtime_transcriber()
         startup_runtime_snapshot = make_runtime_snapshot("startup")
         websocket_runtime_snapshot = make_runtime_snapshot("websocket")
@@ -347,7 +301,7 @@ class ServerEndpointTests(unittest.TestCase):
             return websocket_runtime_snapshot
 
         try:
-            with patch.object(server, "asr_service", fake_asr), patch.object(server, "preview_asr_service", fake_preview_asr, create=True), patch.object(
+            with patch.object(server, "asr_service", fake_asr), patch.object(
                 server,
                 "get_llm_status",
                 side_effect=["startup-ok", AssertionError("websocket should not probe llm")],
@@ -373,7 +327,6 @@ class ServerEndpointTests(unittest.TestCase):
                         self.assertEqual(ready["asr_state"], "ready")
                         self.assertNotIn("final_asr_model", ready)
                         self.assertNotIn("preview_asr_model", ready)
-                        self.assertNotIn("preview_enabled", ready)
                         self.assertNotIn("final_asr_state", ready)
                         self.assertNotIn("preview_asr_state", ready)
                         self.assertEqual(ready["runtime"], websocket_runtime_snapshot.to_dict())
@@ -385,30 +338,23 @@ class ServerEndpointTests(unittest.TestCase):
 
     def test_shutdown_event_shuts_down_single_asr_service(self):
         fake_final_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
         fake_runtime_snapshot = make_runtime_snapshot("shutdown")
 
         with patch.object(server, "asr_service", fake_final_asr), \
-             patch.object(server, "preview_asr_service", fake_preview_asr, create=True), \
              patch.object(server, "get_llm_status", return_value="ok"), \
              patch.object(server, "refresh_runtime_snapshot", return_value=fake_runtime_snapshot, create=True):
             with TestClient(server.app):
                 pass
 
-        fake_preview_asr.shutdown.assert_not_awaited()
         fake_final_asr.shutdown.assert_awaited_once()
 
     def test_readiness_degrades_when_single_asr_is_not_ready(self):
         fake_final_asr = make_fake_asr(initialized=False)
-        fake_preview_asr = make_fake_asr(initialized=True)
         fake_final_asr.initialization_state = lambda: "idle"
         fake_final_asr.initialization_error = lambda: None
-        fake_preview_asr.initialization_state = lambda: "ready"
-        fake_preview_asr.initialization_error = lambda: None
         fake_runtime_snapshot = make_runtime_snapshot("readiness-single-asr-not-ready")
 
         with patch.object(server, "asr_service", fake_final_asr), \
-             patch.object(server, "preview_asr_service", fake_preview_asr, create=True), \
              patch.object(server, "get_llm_status", return_value="ok"), \
              patch.object(server, "refresh_runtime_snapshot", return_value=fake_runtime_snapshot, create=True):
             with TestClient(server.app) as client:
@@ -421,12 +367,11 @@ class ServerEndpointTests(unittest.TestCase):
 
     def test_meeting_history_endpoints_support_detail_export_edit_and_delete(self):
         fake_asr = make_fake_asr(initialized=True)
-        fake_preview_asr = make_fake_asr(initialized=True)
 
         with TemporaryDirectory() as tmpdir:
             store, recording_path = self._build_store_with_meeting(tmpdir)
 
-            with patch.object(server, "asr_service", fake_asr), patch.object(server, "preview_asr_service", fake_preview_asr, create=True), patch.object(server, "meeting_store", store), patch.object(server.session_manager, "store", store):
+            with patch.object(server, "asr_service", fake_asr), patch.object(server, "meeting_store", store), patch.object(server.session_manager, "store", store):
                 with TestClient(server.app) as client:
                     response = client.get("/api/meetings")
                     self.assertEqual(response.status_code, 200)

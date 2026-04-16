@@ -28,7 +28,6 @@ from fastapi import Body, HTTPException
 from asr import (
     ASRService,
     FinalOnlyASRRouter,
-    PreviewFinalASRRouter,
     RealtimeTranscriptEvent,
     WebRTCVADMeetingTranscriber,
 )
@@ -49,10 +48,6 @@ logger = logging.getLogger("meeting.server")
 
 # Initialize services
 asr_service = ASRService(asr_config)
-# Legacy symbol kept for backward compatibility with tests that patch
-# preview_asr_service. Task 1 collapses runtime to a single ASR lane, so this
-# must never be used for runtime branching.
-preview_asr_service = None
 meeting_store = MeetingStore(server_config.database_path)
 session_manager = SessionManager(llm_config, meeting_config)
 session_manager.store = meeting_store
@@ -83,13 +78,8 @@ def build_transformer_chunking_config(config):
 
 
 def build_realtime_transcriber(session_state: dict) -> WebRTCVADMeetingTranscriber:
-    """Build the realtime VAD transcriber with preview/final routing.
-
-    Task 1 collapses runtime ASR to a single service, but keeps realtime preview
-    behavior stable by routing both preview and final through the same service.
-    """
-    router = PreviewFinalASRRouter(
-        asr_service,
+    """Build the realtime VAD transcriber with a final-only ASR router."""
+    router = FinalOnlyASRRouter(
         asr_service,
         language_getter=lambda: session_state.get("language"),
         context_getter=lambda: session_state.get("asr_prompt"),

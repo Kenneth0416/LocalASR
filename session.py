@@ -65,19 +65,6 @@ class TranscriptSegment:
 
 
 @dataclass
-class LivePreviewSegment:
-    """An in-memory live preview segment."""
-
-    segment_id: int
-    revision: int
-    speaker: str
-    text: str
-    start_time: float
-    end_time: float
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-
-
-@dataclass
 class ChatMessage:
     """A chat message"""
 
@@ -115,7 +102,6 @@ class MeetingSession:
         self.store = store
 
         self.transcript: list[TranscriptSegment] = []
-        self.live_preview_segments: dict[int, LivePreviewSegment] = {}
         self.chat_history: list[ChatMessage] = []
         self.summary: Optional[MeetingSummary] = None
         self.created_at = datetime.now().isoformat()
@@ -140,39 +126,6 @@ class MeetingSession:
                 ordinal=len(self.transcript),
             )
         return segment
-
-    def upsert_live_preview_segment(
-        self,
-        segment_id: int,
-        revision: int,
-        speaker: str,
-        text: str,
-        start_time: float,
-        end_time: float,
-    ) -> tuple[LivePreviewSegment, bool]:
-        """Store a live preview segment without persisting it."""
-        existing = self.live_preview_segments.get(segment_id)
-        if existing is not None and revision <= existing.revision:
-            return existing, False
-
-        segment = LivePreviewSegment(
-            segment_id=segment_id,
-            revision=revision,
-            speaker=speaker,
-            text=text,
-            start_time=start_time,
-            end_time=end_time,
-        )
-        self.live_preview_segments[segment_id] = segment
-        return segment, True
-
-    def clear_live_preview_segment(self, segment_id: int) -> None:
-        """Remove one finalized preview segment from the in-memory cache."""
-        self.live_preview_segments.pop(segment_id, None)
-
-    def clear_live_preview_segments(self) -> None:
-        """Clear all in-memory live preview segments."""
-        self.live_preview_segments.clear()
 
     def add_chat_message(self, role: str, content: str, message_id: Optional[str] = None) -> ChatMessage:
         """Append a chat message to session history."""

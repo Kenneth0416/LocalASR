@@ -77,8 +77,7 @@ class FakeRealtimeTranscriber:
 
     async def push_pcm(self, pcm_chunk):
         if self.push_results:
-            result = self.push_results.pop(0)
-            return result
+            return self.push_results.pop(0)
         return []
 
     async def flush(self, reason: str = "flush"):
@@ -121,359 +120,50 @@ class FakePromptAwareRealtimeTranscriber:
 
 
 class ServerWebSocketTests(unittest.TestCase):
-    def test_live_preview_upsert_ignores_stale_revisions(self):
-        session = MeetingSession("session-preview-cache", server.llm_config, server.meeting_config, store=None)
-
-        newest, newest_accepted = session.upsert_live_preview_segment(
-            segment_id=7,
-            revision=3,
-            speaker="发言人",
-            text="最新内容",
-            start_time=1.0,
-            end_time=2.0,
-        )
-        stale, stale_accepted = session.upsert_live_preview_segment(
-            segment_id=7,
-            revision=2,
-            speaker="发言人",
-            text="旧内容",
-            start_time=1.0,
-            end_time=2.0,
-        )
-
-        self.assertTrue(newest_accepted)
-        self.assertFalse(stale_accepted)
-        self.assertEqual(newest.text, "最新内容")
-        self.assertEqual(stale.text, "最新内容")
-        self.assertEqual(session.live_preview_segments[7].revision, 3)
-        self.assertEqual(session.live_preview_segments[7].text, "最新内容")
-
-    def test_live_preview_upsert_ignores_duplicate_revision_replays(self):
-        session = MeetingSession("session-preview-cache-replay", server.llm_config, server.meeting_config, store=None)
-
-        first, first_accepted = session.upsert_live_preview_segment(
-            segment_id=9,
-            revision=4,
-            speaker="发言人",
-            text="第一次预览",
-            start_time=2.0,
-            end_time=3.0,
-        )
-        replay, replay_accepted = session.upsert_live_preview_segment(
-            segment_id=9,
-            revision=4,
-            speaker="发言人",
-            text="重复回放",
-            start_time=2.0,
-            end_time=3.0,
-        )
-
-        self.assertTrue(first_accepted)
-        self.assertFalse(replay_accepted)
-        self.assertEqual(first.text, "第一次预览")
-        self.assertEqual(replay.text, "第一次预览")
-        self.assertEqual(session.live_preview_segments[9].revision, 4)
-        self.assertEqual(session.live_preview_segments[9].text, "第一次预览")
-
-    def test_empty_final_clears_live_preview_without_persisting(self):
+    def test_websocket_transcript_events_are_final_only(self):
         fake_transcriber = FakeRealtimeTranscriber(
-            push_results=[
-                [
-                    make_realtime_event(
-                        event_type="preview",
-                        text="临时预览",
-                        segment_id=1,
-                        revision=1,
-                        is_final=False,
-                        cut_reason="preview_tick",
-                    )
-                ]
-            ],
-            flush_results=[
-                [
-                    make_realtime_event(
-                        event_type="final",
-                        text="",
-                        segment_id=1,
-                        revision=2,
-                        is_final=True,
-                        cut_reason="stop",
-                    )
-                ]
-            ],
+            push_results=[[
+                make_realtime_event(
+                    event_type="final",
+                    text="只发定稿",
+                    segment_id=1,
+                    revision=1,
+                    is_final=True,
+                    cut_reason="endpoint",
+                )
+            ]]
         )
-        session = MeetingSession("session-empty-final", server.llm_config, server.meeting_config, store=None)
+        session = MeetingSession("session-final-only", server.llm_config, server.meeting_config, store=None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            recording_dir = Path(tmpdir)
             with patch.object(server, "asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
                  patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
                  patch.object(server.session_manager, "create_session", return_value=session), \
                  patch.object(server.meeting_store, "complete_session"), \
-                 patch.object(server, "RECORDINGS_DIR", recording_dir):
+                 patch.object(server, "RECORDINGS_DIR", Path(tmpdir)):
                 with TestClient(server.app) as client:
                     with client.websocket_connect("/ws/meeting") as websocket:
                         websocket.receive_json()
                         websocket.send_text(json.dumps({"type": "start"}))
                         receive_until_type(websocket, "status")
                         receive_until_type(websocket, "start_ack")
-
                         websocket.send_bytes(make_pcm((0.1, 1800)))
 
-                        preview = receive_until_type(websocket, "transcript")
-                        self.assertEqual(preview["segment"]["id"], "")
-                        self.assertEqual(preview["segment"]["segment_id"], 1)
-                        receive_until_type(websocket, "transcribe_done")
-                        self.assertIn(1, session.live_preview_segments)
+                        transcript = receive_until_type(websocket, "transcript")
+                        done = receive_until_type(websocket, "transcribe_done")
 
                         websocket.send_text(json.dumps({"type": "stop"}))
-
-                        final_done = receive_until_type(websocket, "transcribe_done")
-                        self.assertTrue(final_done["is_final"])
-                        self.assertEqual(final_done["segment_id"], 1)
-                        closed = receive_until_type(websocket, "stopped")
-                        self.assertEqual(closed["type"], "stopped")
-
-        self.assertEqual(session.live_preview_segments, {})
-        self.assertEqual(session.transcript, [])
-
-    def test_stale_preview_revision_is_not_broadcast_to_client(self):
-        fake_transcriber = FakeRealtimeTranscriber(
-            push_results=[
-                [
-                    make_realtime_event(
-                        event_type="preview",
-                        text="最新预览",
-                        segment_id=5,
-                        revision=3,
-                        is_final=False,
-                        cut_reason="preview_tick",
-                    ),
-                    make_realtime_event(
-                        event_type="preview",
-                        text="旧预览",
-                        segment_id=5,
-                        revision=2,
-                        is_final=False,
-                        cut_reason="preview_tick",
-                    ),
-                ]
-            ],
-            flush_results=[[]],
-        )
-        session = MeetingSession("session-stale-preview", server.llm_config, server.meeting_config, store=None)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            recording_dir = Path(tmpdir)
-            with patch.object(server, "asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
-                 patch.object(server.session_manager, "create_session", return_value=session), \
-                 patch.object(server.meeting_store, "complete_session"), \
-                 patch.object(server, "RECORDINGS_DIR", recording_dir):
-                with TestClient(server.app) as client:
-                    with client.websocket_connect("/ws/meeting") as websocket:
-                        websocket.receive_json()
-                        websocket.send_text(json.dumps({"type": "start"}))
-                        receive_until_type(websocket, "status")
-                        receive_until_type(websocket, "start_ack")
-
-                        websocket.send_bytes(make_pcm((0.1, 1800)))
-                        websocket.send_text(json.dumps({"type": "stop"}))
-
-                        messages = []
-                        while True:
-                            message = websocket.receive_json()
-                            messages.append(message)
-                            if message["type"] == "stopped":
-                                break
-
-        transcript_messages = [msg for msg in messages if msg["type"] == "transcript"]
-        self.assertEqual(len(transcript_messages), 1)
-        self.assertEqual(transcript_messages[0]["segment"]["segment_id"], 5)
-        self.assertEqual(transcript_messages[0]["segment"]["revision"], 3)
-        self.assertEqual(transcript_messages[0]["segment"]["text"], "最新预览")
-        self.assertEqual(session.live_preview_segments[5].revision, 3)
-        self.assertEqual(session.live_preview_segments[5].text, "最新预览")
-
-    def test_final_clears_only_its_live_preview_segment(self):
-        fake_transcriber = FakeRealtimeTranscriber(
-            push_results=[
-                [
-                    make_realtime_event(
-                        event_type="preview",
-                        text="第一段预览",
-                        segment_id=1,
-                        revision=1,
-                        is_final=False,
-                        cut_reason="preview_tick",
-                    ),
-                    make_realtime_event(
-                        event_type="preview",
-                        text="第二段预览",
-                        segment_id=2,
-                        revision=1,
-                        is_final=False,
-                        cut_reason="preview_tick",
-                    ),
-                ]
-            ],
-            flush_results=[
-                [
-                    make_realtime_event(
-                        event_type="final",
-                        text="第一段最终",
-                        segment_id=1,
-                        revision=2,
-                        is_final=True,
-                        cut_reason="stop",
-                    )
-                ]
-            ],
-        )
-        session = MeetingSession("session-live-preview-clear", server.llm_config, server.meeting_config, store=None)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            recording_dir = Path(tmpdir)
-            with patch.object(server, "asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
-                 patch.object(server.session_manager, "create_session", return_value=session), \
-                 patch.object(server.meeting_store, "complete_session"), \
-                 patch.object(server, "RECORDINGS_DIR", recording_dir):
-                with TestClient(server.app) as client:
-                    with client.websocket_connect("/ws/meeting") as websocket:
-                        websocket.receive_json()
-                        websocket.send_text(json.dumps({"type": "start"}))
-                        receive_until_type(websocket, "status")
-                        receive_until_type(websocket, "start_ack")
-
-                        websocket.send_bytes(make_pcm((0.1, 1800)))
-
-                        preview_one = receive_until_type(websocket, "transcript")
-                        self.assertEqual(preview_one["segment"]["segment_id"], 1)
-                        self.assertEqual(preview_one["segment"]["id"], "")
-                        receive_until_type(websocket, "transcribe_done")
-
-                        preview_two = receive_until_type(websocket, "transcript")
-                        self.assertEqual(preview_two["segment"]["segment_id"], 2)
-                        self.assertEqual(preview_two["segment"]["id"], "")
-                        receive_until_type(websocket, "transcribe_done")
-
-                        self.assertEqual(session.live_preview_segments[1].revision, 1)
-                        self.assertEqual(session.live_preview_segments[1].text, "第一段预览")
-                        self.assertEqual(session.live_preview_segments[2].text, "第二段预览")
-
-                        websocket.send_text(json.dumps({"type": "stop"}))
-
-                        final = receive_until_type(websocket, "transcript")
-                        self.assertEqual(final["segment"]["segment_id"], 1)
-                        self.assertNotEqual(final["segment"]["id"], "")
-                        self.assertEqual(final["segment"]["cut_reason"], "stop")
-                        receive_until_type(websocket, "transcribe_done")
                         receive_until_type(websocket, "stopped")
 
-                        self.assertNotIn(1, session.live_preview_segments)
-                        self.assertIn(2, session.live_preview_segments)
-                        self.assertEqual(session.live_preview_segments[2].text, "第二段预览")
+        self.assertEqual(transcript["segment"]["text"], "只发定稿")
+        self.assertEqual(transcript["segment"]["id"], session.transcript[0].id)
+        self.assertEqual(transcript["segment"]["segment_id"], 1)
+        self.assertEqual(transcript["segment"]["revision"], 1)
+        self.assertTrue(transcript["segment"]["is_final"])
+        self.assertEqual(done["phase"], "final")
+        self.assertTrue(done["is_final"])
 
-        self.assertEqual(fake_transcriber.flush_reasons, ["stop"])
-
-    def test_preview_event_does_not_persist_and_final_reuses_segment_id(self):
-        fake_transcriber = FakeRealtimeTranscriber(
-            push_results=[
-                [
-                    make_realtime_event(
-                        event_type="preview",
-                        text="先试一下",
-                        segment_id=1,
-                        revision=1,
-                        is_final=False,
-                        cut_reason="preview_tick",
-                    )
-                ]
-            ],
-            flush_results=[
-                [
-                    make_realtime_event(
-                        event_type="final",
-                        text="先试一下确认版",
-                        segment_id=1,
-                        revision=2,
-                        is_final=True,
-                        cut_reason="stop",
-                    )
-                ]
-            ],
-        )
-        session = MeetingSession("session-preview", server.llm_config, server.meeting_config, store=None)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            recording_dir = Path(tmpdir)
-            with patch.object(server, "asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
-                 patch.object(server.session_manager, "create_session", return_value=session), \
-                 patch.object(server.meeting_store, "complete_session"), \
-                 patch.object(server, "RECORDINGS_DIR", recording_dir):
-                with TestClient(server.app) as client:
-                    with client.websocket_connect("/ws/meeting") as websocket:
-                        ready = websocket.receive_json()
-                        self.assertEqual(ready["type"], "ready")
-
-                        websocket.send_text(json.dumps({"type": "start"}))
-                        self.assertEqual(receive_until_type(websocket, "status")["type"], "status")
-                        self.assertEqual(receive_until_type(websocket, "start_ack")["type"], "start_ack")
-
-                        websocket.send_bytes(make_pcm((0.1, 1800)))
-
-                        preview = receive_until_type(websocket, "transcript")
-                        self.assertEqual(preview["type"], "transcript")
-                        self.assertEqual(preview["segment"]["id"], "")
-                        self.assertEqual(preview["segment"]["segment_id"], 1)
-                        self.assertEqual(preview["segment"]["revision"], 1)
-                        self.assertFalse(preview["segment"]["is_final"])
-                        self.assertEqual(preview["segment"]["cut_reason"], "preview_tick")
-                        self.assertEqual(len(session.transcript), 0)
-                        self.assertIn(1, session.live_preview_segments)
-                        self.assertEqual(session.live_preview_segments[1].text, "先试一下")
-
-                        preview_done = websocket.receive_json()
-                        self.assertEqual(preview_done["type"], "transcribe_done")
-                        self.assertEqual(preview_done["phase"], "preview")
-                        self.assertEqual(preview_done["segment_id"], 1)
-                        self.assertEqual(preview_done["revision"], 1)
-                        self.assertFalse(preview_done["is_final"])
-                        self.assertEqual(preview_done["cut_reason"], "preview_tick")
-
-                        websocket.send_text(json.dumps({"type": "stop"}))
-
-                        final = receive_until_type(websocket, "transcript")
-                        self.assertEqual(final["type"], "transcript")
-                        self.assertNotEqual(final["segment"]["id"], "")
-                        self.assertEqual(final["segment"]["segment_id"], 1)
-                        self.assertEqual(final["segment"]["revision"], 2)
-                        self.assertTrue(final["segment"]["is_final"])
-                        self.assertEqual(final["segment"]["cut_reason"], "stop")
-                        self.assertEqual(len(session.transcript), 1)
-                        self.assertEqual(session.transcript[0].text, "先试一下确认版")
-                        self.assertEqual(session.live_preview_segments, {})
-
-                        final_done = websocket.receive_json()
-                        self.assertEqual(final_done["type"], "transcribe_done")
-                        self.assertEqual(final_done["phase"], "final")
-                        self.assertEqual(final_done["segment_id"], 1)
-                        self.assertEqual(final_done["revision"], 2)
-                        self.assertTrue(final_done["is_final"])
-                        self.assertEqual(final_done["cut_reason"], "stop")
-
-                        closed = receive_until_type(websocket, "stopped")
-                        self.assertEqual(closed["type"], "stopped")
-
-        self.assertEqual(fake_transcriber.flush_reasons, ["stop"])
-
-    def test_final_only_compatibility_still_persists_transcript(self):
+    def test_final_only_transcript_persists_on_stop_flush(self):
         fake_transcriber = FakeRealtimeTranscriber(
             push_results=[[]],
             flush_results=[
@@ -489,12 +179,11 @@ class ServerWebSocketTests(unittest.TestCase):
                 ]
             ],
         )
-        session = MeetingSession("session-final-only", server.llm_config, server.meeting_config, store=None)
+        session = MeetingSession("session-final-flush", server.llm_config, server.meeting_config, store=None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             recording_dir = Path(tmpdir)
             with patch.object(server, "asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
                  patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
                  patch.object(server.session_manager, "create_session", return_value=session), \
                  patch.object(server.meeting_store, "complete_session"), \
@@ -509,27 +198,18 @@ class ServerWebSocketTests(unittest.TestCase):
                         websocket.send_bytes(make_pcm((0.1, 1800)))
                         websocket.send_text(json.dumps({"type": "stop"}))
 
-                        final = receive_until_type(websocket, "transcript")
-                        self.assertNotEqual(final["segment"]["id"], "")
-                        self.assertEqual(final["segment"]["segment_id"], 1)
-                        self.assertEqual(final["segment"]["revision"], 1)
-                        self.assertTrue(final["segment"]["is_final"])
-                        self.assertEqual(final["segment"]["cut_reason"], "flush")
-                        self.assertEqual(final["segment"]["text"], "纯最终结果")
-                        self.assertEqual(len(session.transcript), 1)
-                        self.assertEqual(session.transcript[0].text, "纯最终结果")
+                        transcript = receive_until_type(websocket, "transcript")
+                        done = receive_until_type(websocket, "transcribe_done")
+                        stopped = receive_until_type(websocket, "stopped")
 
-                        final_done = websocket.receive_json()
-                        self.assertEqual(final_done["type"], "transcribe_done")
-                        self.assertEqual(final_done["phase"], "final")
-                        self.assertEqual(final_done["segment_id"], 1)
-                        self.assertEqual(final_done["revision"], 1)
-                        self.assertTrue(final_done["is_final"])
-                        self.assertEqual(final_done["cut_reason"], "flush")
-
-                        closed = receive_until_type(websocket, "stopped")
-                        self.assertEqual(closed["type"], "stopped")
-
+        self.assertEqual(transcript["segment"]["text"], "纯最终结果")
+        self.assertTrue(transcript["segment"]["is_final"])
+        self.assertEqual(done["phase"], "final")
+        self.assertTrue(done["is_final"])
+        self.assertEqual(done["cut_reason"], "flush")
+        self.assertEqual(stopped["type"], "stopped")
+        self.assertEqual(len(session.transcript), 1)
+        self.assertEqual(session.transcript[0].text, "纯最终结果")
         self.assertEqual(fake_transcriber.flush_reasons, ["stop"])
 
     def test_semantic_transcript_emits_on_pause_and_flushes_tail(self):
@@ -568,7 +248,6 @@ class ServerWebSocketTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             recording_dir = Path(tmpdir)
             with patch.object(server, "asr_service", fake_asr), \
-                 patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
                  patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
                  patch.object(server.meeting_store, "complete_session"), \
                  patch.object(server, "RECORDINGS_DIR", recording_dir):
@@ -583,39 +262,28 @@ class ServerWebSocketTests(unittest.TestCase):
 
                         websocket.send_bytes(make_pcm((3.6, 1800), (0.6, 0)))
                         transcript = receive_until_type(websocket, "transcript")
-                        self.assertEqual(transcript["type"], "transcript")
                         self.assertEqual(transcript["segment"]["text"], "今天我们讨论预算")
                         self.assertEqual(transcript["segment"]["segment_id"], 1)
                         self.assertEqual(transcript["segment"]["revision"], 1)
                         self.assertTrue(transcript["segment"]["is_final"])
                         self.assertEqual(transcript["segment"]["cut_reason"], "semantic")
-                        self.assertAlmostEqual(transcript["segment"]["start"], 0.0, places=2)
-                        self.assertAlmostEqual(transcript["segment"]["end"], 4.0, places=1)
 
                         done = websocket.receive_json()
                         self.assertEqual(done["type"], "transcribe_done")
                         self.assertEqual(done["phase"], "final")
-                        self.assertEqual(done["segment_id"], 1)
-                        self.assertEqual(done["revision"], 1)
                         self.assertTrue(done["is_final"])
 
                         websocket.send_bytes(make_pcm((1.4, 1800)))
                         websocket.send_text(json.dumps({"type": "stop"}))
                         transcript = receive_until_type(websocket, "transcript")
-                        self.assertEqual(transcript["type"], "transcript")
                         self.assertEqual(transcript["segment"]["text"], "最后补一句")
                         self.assertEqual(transcript["segment"]["segment_id"], 2)
-                        self.assertEqual(transcript["segment"]["revision"], 1)
                         self.assertTrue(transcript["segment"]["is_final"])
                         self.assertEqual(transcript["segment"]["cut_reason"], "flush")
-                        self.assertAlmostEqual(transcript["segment"]["start"], 4.0, places=1)
-                        self.assertAlmostEqual(transcript["segment"]["end"], 5.6, places=1)
 
                         done = websocket.receive_json()
                         self.assertEqual(done["type"], "transcribe_done")
                         self.assertEqual(done["phase"], "final")
-                        self.assertEqual(done["segment_id"], 2)
-                        self.assertEqual(done["revision"], 1)
                         self.assertTrue(done["is_final"])
 
                         closed = receive_until_type(websocket, "stopped")
@@ -651,7 +319,6 @@ class ServerWebSocketTests(unittest.TestCase):
                 ]
             )
             with patch.object(server, "asr_service", fake_asr), \
-                 patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
                  patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
                  patch.object(server, "RECORDINGS_DIR", recording_dir), \
                  patch.object(server.meeting_store, "complete_session"):
@@ -668,7 +335,6 @@ class ServerWebSocketTests(unittest.TestCase):
                         websocket.send_text(json.dumps({"type": "stop"}))
 
                         transcript = receive_until_type(websocket, "transcript")
-                        self.assertEqual(transcript["type"], "transcript")
                         self.assertEqual(transcript["segment"]["text"], "tail audio")
                         self.assertTrue(transcript["segment"]["is_final"])
 
@@ -727,13 +393,13 @@ class ServerWebSocketTests(unittest.TestCase):
         )
 
         with patch.object(server, "asr_service", fake_asr), \
-             patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
              patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
              patch.object(server.meeting_store, "complete_session"):
             with TestClient(server.app) as client:
                 with client.websocket_connect("/ws/meeting") as websocket:
                     websocket.receive_json()
                     websocket.send_text(json.dumps({"type": "start"}))
+                    receive_until_type(websocket, "status")
                     receive_until_type(websocket, "start_ack")
 
                     websocket.send_bytes(make_pcm((5.0, 1800)))
@@ -753,7 +419,6 @@ class ServerWebSocketTests(unittest.TestCase):
         fake_transcriber = FakeRealtimeTranscriber()
 
         with patch.object(server, "asr_service", fake_asr), \
-             patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
              patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
              patch.object(server.meeting_store, "complete_session"):
             with TestClient(server.app) as client:
@@ -790,7 +455,6 @@ class ServerWebSocketTests(unittest.TestCase):
             return fake_transcriber
 
         with patch.object(server, "asr_service", fake_asr), \
-             patch.object(server, "preview_asr_service", make_fake_asr_service(initialized=True)), \
              patch.object(server, "build_realtime_transcriber", side_effect=build_fake_transcriber, create=True), \
              patch.object(server.meeting_store, "complete_session"):
             with TestClient(server.app) as client:

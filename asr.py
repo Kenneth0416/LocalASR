@@ -28,9 +28,7 @@ from asr_types import LiteASRResult  # noqa: F401
 
 
 class FinalOnlyASRRouter(BaseASRRouter):
-    """ASR router that only performs final transcription (no preview).
-    Used when preview ASR is disabled via DISABLE_PREVIEW_ASR env var.
-    """
+    """ASR router that only performs final transcription."""
 
     def __init__(
         self,
@@ -41,59 +39,6 @@ class FinalOnlyASRRouter(BaseASRRouter):
     ):
         from asr_service import ASRService
 
-        self._final_service: ASRService = final_service
-        self._language_getter = language_getter
-        self._context_getter = context_getter
-        # Tracks the last finalized segment's text for dynamic context window
-        self._previous_segment_text: str = ""
-
-    async def transcribe_preview(self, audio_tuple) -> LiteASRResult:
-        return LiteASRResult(text="", duration_sec=0.0)
-
-    async def transcribe_preview_streaming(self, audio_tuple):
-        yield LiteASRResult(text="", duration_sec=0.0)
-
-    def _build_context(self) -> str | None:
-        """Combine static prompt and previous segment text as dynamic context."""
-        static = self._context_getter() or ""
-        prev = self._previous_segment_text
-        if prev:
-            # Append previous segment text to give ASR continuity context
-            combined = (static + "\n" + prev).strip()
-            return combined if combined else None
-        return static if static else None
-
-    async def transcribe_final(self, audio_tuple) -> LiteASRResult:
-        context = self._build_context()
-        result = await self._final_service.transcribe_wav(
-            audio_tuple,
-            language=self._language_getter(),
-            context=context,
-        )
-        text = (result.text or "").strip()
-        # Update previous segment text for the next segment's context
-        if text:
-            self._previous_segment_text = text
-        return LiteASRResult(
-            text=text,
-            duration_sec=float(getattr(result, "audio_duration", 0.0) or 0.0),
-        )
-
-
-class PreviewFinalASRRouter(BaseASRRouter):
-    """ASR router that uses a small model for preview and a full model for final."""
-
-    def __init__(
-        self,
-        preview_service: "ASRService",
-        final_service: "ASRService",
-        *,
-        language_getter: "Callable[[], str | None]",
-        context_getter: "Callable[[], str | None]",
-    ):
-        from asr_service import ASRService
-
-        self._preview_service: ASRService = preview_service
         self._final_service: ASRService = final_service
         self._language_getter = language_getter
         self._context_getter = context_getter
@@ -105,33 +50,10 @@ class PreviewFinalASRRouter(BaseASRRouter):
         static = self._context_getter() or ""
         prev = self._previous_segment_text
         if prev:
+            # Append previous segment text to give ASR continuity context
             combined = (static + "\n" + prev).strip()
             return combined if combined else None
         return static if static else None
-
-    async def transcribe_preview(self, audio_tuple) -> LiteASRResult:
-        context = self._build_context()
-        result = await self._preview_service.transcribe_wav(
-            audio_tuple,
-            language=self._language_getter(),
-            context=context,
-        )
-        return LiteASRResult(
-            text=(result.text or "").strip(),
-            duration_sec=float(getattr(result, "audio_duration", 0.0) or 0.0),
-        )
-
-    async def transcribe_preview_streaming(self, audio_tuple):
-        context = self._build_context()
-        async for result in self._preview_service.transcribe_wav_streaming(
-            audio_tuple,
-            language=self._language_getter(),
-            context=context,
-        ):
-            yield LiteASRResult(
-                text=(result.text or "").strip(),
-                duration_sec=float(getattr(result, "audio_duration", 0.0) or 0.0),
-            )
 
     async def transcribe_final(self, audio_tuple) -> LiteASRResult:
         context = self._build_context()
@@ -180,7 +102,6 @@ __all__ = [
     "ASRServiceError",
     # Routers
     "FinalOnlyASRRouter",
-    "PreviewFinalASRRouter",
     # VAD
     "WebRTCVADMeetingTranscriber",
     "WebRTCVADConfig",
