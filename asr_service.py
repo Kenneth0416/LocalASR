@@ -48,6 +48,10 @@ class ASRService:
         self._model = None
         self._processor = None
         self._model_lock = threading.Lock()
+        # A single ASRService may serve both preview and final inference during
+        # the single-service transition. Serialize model access per service so
+        # concurrent generate() calls never race on the same model object.
+        self._inference_lock = threading.Lock()
         self._initialized = False
         self._init_task: Optional[asyncio.Task] = None
         self._init_error: Optional[BaseException] = None
@@ -330,6 +334,37 @@ class ASRService:
 
     # ── Streaming transcription ───────────────────────────────────────────────
 
+    def _run_model_generate(self, hf_model, inputs, *, streamer=None):
+        kwargs = {
+            **inputs,
+            "max_new_tokens": self.config.max_new_tokens,
+            "do_sample": False,
+            "repetition_penalty": 1.1,
+        }
+        if streamer is not None:
+            kwargs["streamer"] = streamer
+
+        with self._inference_lock:
+            with torch.no_grad():
+                return hf_model.generate(**kwargs)
+
+    def _run_model_transcribe(
+        self,
+        qwen_model,
+        *,
+        audio: np.ndarray,
+        sample_rate: int,
+        context: Optional[str],
+        language: Optional[str],
+    ):
+        with self._inference_lock:
+            return qwen_model.transcribe(
+                audio=(audio, sample_rate),
+                context=(context or "").strip(),
+                language=language,
+                return_time_stamps=True,
+            )
+
     async def transcribe_wav_streaming(
         self,
         wav_source,
@@ -368,17 +403,9 @@ class ASRService:
 
         # Run model.generate() in thread pool — it writes tokens into streamer
         hf_model = self._model.model
-        max_tokens = self.config.max_new_tokens
 
         def _run_generate():
-            with torch.no_grad():
-                hf_model.generate(
-                    **inputs,
-                    max_new_tokens=max_tokens,
-                    streamer=streamer,
-                    do_sample=False,
-                    repetition_penalty=1.1,
-                )
+            self._run_model_generate(hf_model, inputs, streamer=streamer)
 
         gen_future = loop.run_in_executor(_asr_executor, _run_generate)
 
@@ -562,13 +589,7 @@ class ASRService:
         )
         inputs = inputs.to(qwen_model.model.device).to(qwen_model.model.dtype)
 
-        with torch.no_grad():
-            output_ids = qwen_model.model.generate(
-                **inputs,
-                max_new_tokens=self.config.max_new_tokens,
-                do_sample=False,
-                repetition_penalty=1.1,
-            )
+        output_ids = self._run_model_generate(qwen_model.model, inputs)
 
         # Decode only the generated tokens (skip the prompt)
         generated = output_ids.sequences[:, inputs["input_ids"].shape[1]:]
@@ -590,11 +611,12 @@ class ASRService:
         has_timestamps = False
         if use_timestamps and text:
             try:
-                results_fallback = qwen_model.transcribe(
-                    audio=(audio, sample_rate),
-                    context=(context or "").strip(),
+                results_fallback = self._run_model_transcribe(
+                    qwen_model,
+                    audio=audio,
+                    sample_rate=sample_rate,
+                    context=context,
                     language=effective_language,
-                    return_time_stamps=True,
                 )
                 if results_fallback:
                     time_stamps = getattr(results_fallback[0], "time_stamps", None)

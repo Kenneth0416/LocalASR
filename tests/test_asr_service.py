@@ -1,3 +1,5 @@
+import threading
+import time
 import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -6,6 +8,28 @@ import numpy as np
 
 from asr import ASRResult, ASRService, pcm16le_to_audio_tuple
 from config import ASRConfig
+
+
+class FakeInputs(dict):
+    def to(self, *_args, **_kwargs):
+        return self
+
+
+def install_fake_qwen_utils(parsed_text: str):
+    fake_qwen = ModuleType("qwen_asr")
+    fake_inference = ModuleType("qwen_asr.inference")
+    fake_utils = ModuleType("qwen_asr.inference.utils")
+    fake_utils.parse_asr_output = Mock(return_value=(None, parsed_text))
+    fake_utils.normalize_language_name = Mock(side_effect=lambda language: language)
+    fake_utils.validate_language = Mock()
+    return patch.dict(
+        "sys.modules",
+        {
+            "qwen_asr": fake_qwen,
+            "qwen_asr.inference": fake_inference,
+            "qwen_asr.inference.utils": fake_utils,
+        },
+    )
 
 
 class ASRServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -35,6 +59,11 @@ class ASRServiceTests(unittest.IsolatedAsyncioTestCase):
     def test_transcribe_audio_array_groups_aligner_items_into_user_facing_segment(self):
         service = ASRService(ASRConfig(model_path="/tmp/fake-asr-model"))
         service._model = Mock()
+        service._model.processor = Mock()
+        service._model.processor.return_value = FakeInputs({"input_ids": np.array([[1, 2]], dtype=np.int64)})
+        service._model.processor.batch_decode.return_value = ["<asr_text>你好世界。"]
+        service._model.model = Mock(device="cpu", dtype=np.float32)
+        service._model._build_text_prompt = Mock(return_value="<prompt>")
         service._model.forced_aligner = object()
         service._model.transcribe.return_value = [
             SimpleNamespace(
@@ -48,12 +77,14 @@ class ASRServiceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         ]
+        service._run_model_generate = Mock(return_value=SimpleNamespace(sequences=np.array([[1, 2, 3]], dtype=np.int64)))
 
-        result = service._transcribe_audio_array(
-            audio=np.ones(16000, dtype=np.float32),
-            sample_rate=16000,
-            start_time=0.0,
-        )
+        with install_fake_qwen_utils("你好世界。"):
+            result = service._transcribe_audio_array(
+                audio=np.ones(16000, dtype=np.float32),
+                sample_rate=16000,
+                start_time=0.0,
+            )
 
         self.assertTrue(result.has_timestamps)
         self.assertEqual(
@@ -66,44 +97,47 @@ class ASRServiceTests(unittest.IsolatedAsyncioTestCase):
     def test_transcribe_audio_array_uses_configured_language(self):
         service = ASRService(ASRConfig(model_path="/tmp/fake-asr-model", language="Chinese"))
         service._model = Mock()
+        service._model.processor = Mock()
+        service._model.processor.return_value = FakeInputs({"input_ids": np.array([[1, 2]], dtype=np.int64)})
+        service._model.processor.batch_decode.return_value = ["<asr_text>你好"]
+        service._model.model = Mock(device="cpu", dtype=np.float32)
+        service._model._build_text_prompt = Mock(return_value="<prompt>")
         service._model.forced_aligner = None
-        service._model.transcribe.return_value = [
-            SimpleNamespace(
-                text="你好",
-                time_stamps=None,
+        service._run_model_generate = Mock(return_value=SimpleNamespace(sequences=np.array([[1, 2, 3]], dtype=np.int64)))
+
+        with install_fake_qwen_utils("你好"):
+            service._transcribe_audio_array(
+                audio=np.ones(8000, dtype=np.float32),
+                sample_rate=16000,
+                start_time=0.0,
             )
-        ]
 
-        service._transcribe_audio_array(
-            audio=np.ones(8000, dtype=np.float32),
-            sample_rate=16000,
-            start_time=0.0,
+        service._model._build_text_prompt.assert_called_once_with(
+            context="",
+            force_language="Chinese",
         )
-
-        service._model.transcribe.assert_called_once()
-        self.assertEqual(service._model.transcribe.call_args.kwargs["language"], "Chinese")
-        self.assertFalse(service._model.transcribe.call_args.kwargs["return_time_stamps"])
 
     def test_transcribe_audio_array_passes_context_to_qwen_prompt(self):
         service = ASRService(ASRConfig(model_path="/tmp/fake-asr-model"))
         service._model = Mock()
+        service._model.processor = Mock()
+        service._model.processor.return_value = FakeInputs({"input_ids": np.array([[1, 2]], dtype=np.int64)})
+        service._model.processor.batch_decode.return_value = ["<asr_text>术语识别正确"]
+        service._model.model = Mock(device="cpu", dtype=np.float32)
+        service._model._build_text_prompt = Mock(return_value="<prompt>")
         service._model.forced_aligner = None
-        service._model.transcribe.return_value = [
-            SimpleNamespace(
-                text="术语识别正确",
-                time_stamps=None,
-            )
-        ]
+        service._run_model_generate = Mock(return_value=SimpleNamespace(sequences=np.array([[1, 2, 3]], dtype=np.int64)))
 
-        service._transcribe_audio_array(
-            audio=np.ones(8000, dtype=np.float32),
-            sample_rate=16000,
-            start_time=0.0,
-            context="术语：Qwen3-ASR，Codex",
-        )
+        with install_fake_qwen_utils("术语识别正确"):
+            service._transcribe_audio_array(
+                audio=np.ones(8000, dtype=np.float32),
+                sample_rate=16000,
+                start_time=0.0,
+                context="术语：Qwen3-ASR，Codex",
+            )
 
         self.assertEqual(
-            service._model.transcribe.call_args.kwargs["context"],
+            service._model._build_text_prompt.call_args.kwargs["context"],
             "术语：Qwen3-ASR，Codex",
         )
 
@@ -149,8 +183,8 @@ class ASRServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch.dict("sys.modules", {"qwen_asr": fake_qwen_asr}), \
-             patch("asr.os.path.exists", side_effect=lambda path: path in {"/tmp/fake-asr-model", "/tmp/fake-aligner-model"}), \
-             patch("asr.load_alignment_model", return_value=fake_aligner) as load_alignment_model:
+             patch("asr_service.os.path.exists", side_effect=lambda path: path in {"/tmp/fake-asr-model", "/tmp/fake-aligner-model"}), \
+             patch("asr_service.load_alignment_model", return_value=fake_aligner) as load_alignment_model:
             service._load_model_sync()
 
         self.assertEqual(
@@ -158,3 +192,54 @@ class ASRServiceTests(unittest.IsolatedAsyncioTestCase):
             False,
         )
         self.assertEqual(load_alignment_model.call_args.kwargs["low_cpu_mem_usage"], False)
+
+    def test_run_model_generate_serializes_concurrent_calls_per_service(self):
+        service = ASRService(ASRConfig(model_path="/tmp/fake-asr-model"))
+        fake_model = Mock()
+        first_entered = threading.Event()
+        allow_first_exit = threading.Event()
+        second_entered = threading.Event()
+        state = {
+            "active": 0,
+            "max_active": 0,
+            "calls": 0,
+        }
+
+        def fake_generate(**_kwargs):
+            state["calls"] += 1
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+            if state["calls"] == 1:
+                first_entered.set()
+                allow_first_exit.wait(timeout=1.0)
+            else:
+                second_entered.set()
+            time.sleep(0.01)
+            state["active"] -= 1
+            return "ok"
+
+        fake_model.generate.side_effect = fake_generate
+
+        def invoke_generate():
+            service._run_model_generate(fake_model, {})
+
+        thread_1 = threading.Thread(target=invoke_generate)
+        thread_2 = threading.Thread(target=invoke_generate)
+
+        thread_1.start()
+        self.assertTrue(first_entered.wait(timeout=1.0))
+        thread_2.start()
+        time.sleep(0.05)
+
+        self.assertFalse(second_entered.is_set())
+        self.assertEqual(state["max_active"], 1)
+
+        allow_first_exit.set()
+        thread_1.join(timeout=1.0)
+        thread_2.join(timeout=1.0)
+
+        self.assertFalse(thread_1.is_alive())
+        self.assertFalse(thread_2.is_alive())
+        self.assertTrue(second_entered.is_set())
+        self.assertEqual(state["calls"], 2)
+        self.assertEqual(state["max_active"], 1)
