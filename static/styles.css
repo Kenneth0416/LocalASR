@@ -709,20 +709,6 @@ body {
   box-shadow: 0 0 0 1px var(--accent-border), 0 4px 16px var(--accent-glow);
 }
 
-.transcript-block.preview {
-  border-left-color: var(--warning);
-  background: rgba(210, 153, 34, 0.08);
-  box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.2);
-}
-
-.transcript-block.preview .segment-speaker {
-  color: var(--warning);
-}
-
-.transcript-block.preview .segment-text {
-  color: rgba(230, 237, 243, 0.9);
-}
-
 .segment-meta {
   display: flex;
   justify-content: space-between;

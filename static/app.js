@@ -5,7 +5,7 @@
 
 import { requestRealtimeAudioStream, describeRealtimeAudioSupport } from '/static/audio-support.mjs';
 import { ASR_PROMPT_EXAMPLES, createAsrPromptDraft } from '/static/asr-prompt-state.mjs';
-import { createLiveTranscriptState, upsertLiveTranscriptGroup } from '/static/live-transcript-state.mjs';
+import { createFinalTranscriptStore } from '/static/final-transcript-store.mjs';
 import { appendTranscriptionOptions, buildRealtimeStartPayload } from '/static/transcription-options.mjs';
 import { escapeHtml, formatSummary } from '/static/ui-formatters.mjs';
 
@@ -66,7 +66,7 @@ const state = {
     isUploading: false,
     asrPromptDialogOpen: false,
     asrPromptDraft: createAsrPromptDraft(),
-    liveTranscriptState: createLiveTranscriptState(),
+    finalTranscriptStore: createFinalTranscriptStore(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -570,7 +570,7 @@ function buildMeetingExportUrl(sessionId, kind) {
 }
 
 function setTranscriptEmptyState(mode = 'live') {
-    state.liveTranscriptState.reset();
+    state.finalTranscriptStore.reset();
     let svgContent, title, hint;
     if (mode === 'history') {
         svgContent = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -730,8 +730,6 @@ function buildTranscriptBlockMarkup(segment, options = {}) {
     const timeLabel = formatSegmentRange(segment);
     const editable = Boolean(options.editable);
     const isEditing = editable && state.currentEditingSegmentId === segmentId;
-    const previewClass = options.preview ? ' preview' : '';
-    const liveId = options.liveSegmentId ? ` data-live-segment-id="${escapeHtml(String(options.liveSegmentId))}"` : '';
 
     if (isEditing) {
         return `
@@ -762,8 +760,8 @@ function buildTranscriptBlockMarkup(segment, options = {}) {
         : '';
 
     return `
-        <div class="segment-group"${liveId}>
-            <div class="transcript-block${options.latest ? ' latest' : ''}${previewClass}" data-segment-id="${escapeHtml(segmentId)}"${liveId}>
+        <div class="segment-group">
+            <div class="transcript-block${options.latest ? ' latest' : ''}" data-segment-id="${escapeHtml(segmentId)}">
                 <div class="segment-meta">
                     <span class="segment-speaker">${escapeHtml(speaker)}</span>
                     ${actionMarkup || `<span class="segment-time">${escapeHtml(timeLabel)}</span>`}
@@ -777,7 +775,7 @@ function buildTranscriptBlockMarkup(segment, options = {}) {
 
 function renderTranscriptList(segments, options = {}) {
     latestSegmentEl = null;
-    state.liveTranscriptState.reset();
+    state.finalTranscriptStore.reset();
 
     if (!segments.length) {
         setTranscriptEmptyState(options.emptyMode || 'history');
@@ -1404,9 +1402,8 @@ function handleServerMessage(event) {
     }
 }
 
-function upsertTranscriptSegment(segment) {
-    const result = state.liveTranscriptState.apply(segment);
-    if (!result.changed || !result.entry) {
+function appendFinalTranscriptSegment(segment) {
+    if (!state.finalTranscriptStore.accept(segment)) {
         return;
     }
 
@@ -1421,23 +1418,20 @@ function upsertTranscriptSegment(segment) {
     group.className = 'segment-group';
     group.innerHTML = buildTranscriptBlockMarkup(
         {
-            id: result.entry.id || result.entry.segmentId,
-            speaker: result.entry.speaker,
-            text: result.entry.text,
-            start: result.entry.start,
-            end: result.entry.end,
+            id: segment.id,
+            speaker: segment.speaker,
+            text: segment.text,
+            start: segment.start ?? segment.start_time,
+            end: segment.end ?? segment.end_time,
         },
         {
             latest: true,
             editable: false,
-            liveSegmentId: result.entry.segmentId,
-            preview: !result.entry.persisted,
         },
     );
 
     const nextNode = group.firstElementChild;
-    upsertLiveTranscriptGroup(el.transcriptList, result.entry.segmentId, nextNode);
-
+    el.transcriptList.appendChild(nextNode);
     latestSegmentEl = nextNode.querySelector('.transcript-block');
     el.transcriptList.scrollTop = el.transcriptList.scrollHeight;
     updateTranscriptCount();
@@ -1466,7 +1460,7 @@ function handleJsonMessage(msg) {
             break;
 
         case 'transcript':
-            upsertTranscriptSegment(msg.segment);
+            appendFinalTranscriptSegment(msg.segment);
             if (msg.processing_time) {
                 setProcessingStatus(`${msg.processing_time.toFixed(2)}s`);
             }
@@ -1554,7 +1548,7 @@ function cleanup(options = {}) {
     state.isMeetingActive = false;
     state.isConnected = false;
     state.currentEditingSegmentId = null;
-    state.liveTranscriptState.reset();
+    state.finalTranscriptStore.reset();
     teardownRecordingResources();
     latestSegmentEl = null;
 
@@ -1596,6 +1590,7 @@ function resetUI() {
     state.pendingAudioFrames = [];
     state.lastCapturedSeq = -1;
     state.currentEditingSegmentId = null;
+    state.finalTranscriptStore.reset();
     removeThinkingIndicator();
     el.timerDisplay.textContent = '00:00';
     el.recordingTimer.classList.remove('active');
@@ -1680,7 +1675,7 @@ async function handleFileUpload() {
         // Render transcript segments
         if (result.segments && result.segments.length > 0) {
             for (const seg of result.segments) {
-                upsertTranscriptSegment(seg);
+                appendFinalTranscriptSegment(seg);
             }
             updateTranscriptCount();
         }
