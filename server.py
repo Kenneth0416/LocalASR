@@ -379,19 +379,6 @@ if STATIC_DIR.exists():
 
 app.state.STATIC_DIR = STATIC_DIR
 
-# ── SPA catch-all ─────────────────────────────────────────────────────────────────
-from fastapi.responses import FileResponse
-
-@app.get("/{path:path}")
-async def serve_spa(path: str):
-    """Serve index.html for client-side routing."""
-    if path.startswith("api/") or path.startswith("static/") or path in ("docs", "openapi.json", "redoc"):
-        raise HTTPException(status_code=404, detail="Not found")
-    index_path = STATIC_DIR / "index.html"
-    if index_path.exists():
-        return FileResponse(str(index_path))
-    return {"message": "Meeting Realtime Voice API", "docs": "/docs"}
-
 # ── Inject refs into handler modules ──────────────────────────────────────────
 
 
@@ -433,6 +420,19 @@ http_endpoints._inject(
     regenerate_meeting_summary=regenerate_meeting_summary,
     chat_on_meeting_impl=chat_on_meeting,
 )
+
+# ── SPA catch-all (MUST be after all API route registrations) ─────────────────
+from fastapi.responses import FileResponse
+
+@app.get("/{path:path}")
+async def serve_spa(path: str):
+    """Serve index.html for client-side routing."""
+    if path.startswith("api/") or path.startswith("static/") or path in ("docs", "openapi.json", "redoc"):
+        raise HTTPException(status_code=404, detail="Not found")
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return {"message": "Meeting Realtime Voice API", "docs": "/docs"}
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
