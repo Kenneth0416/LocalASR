@@ -33,7 +33,7 @@ from asr import (
 )
 from persistence import MeetingStore
 from runtime_checks import build_runtime_snapshot
-from session import MeetingSession, MeetingSummary, SessionManager
+from session import ChatMessage, MeetingSession, MeetingSummary, SessionManager, TranscriptSegment
 from server_app import app, get_configs, get_app
 
 # Re-export configs from server_app
@@ -204,7 +204,7 @@ def build_transcript_text(meeting: dict) -> str:
     lines: list[str] = []
     for segment in meeting.get("transcript", []):
         lines.append(
-            f'{segment.get("speaker", "发言人")} '
+            f'{segment.get("speaker", "Voice")} '
             f'[{float(segment.get("start_time", 0.0)):.1f}s-{float(segment.get("end_time", 0.0)):.1f}s]: '
             f'{segment.get("text", "")}'
         )
@@ -251,10 +251,17 @@ async def regenerate_meeting_summary(session_id: str) -> dict:
     temp_session = MeetingSession(f"{session_id}-summary", llm_config, meeting_config)
     for segment in meeting.get("transcript", []):
         temp_session.add_transcript_segment(
-            speaker=str(segment.get("speaker", "发言人")),
+            speaker=str(segment.get("speaker", "Voice")),
             text=str(segment.get("text", "")),
             start_time=float(segment.get("start_time", 0.0)),
             end_time=float(segment.get("end_time", 0.0)),
+            capture_start_time=float(segment.get("capture_start_time", segment.get("start_time", 0.0))),
+            capture_duration=float(
+                segment.get(
+                    "capture_duration",
+                    max(float(segment.get("end_time", 0.0)) - float(segment.get("start_time", 0.0)), 0.0),
+                )
+            ),
         )
 
     summary = await temp_session.update_summary()
@@ -283,21 +290,34 @@ async def chat_on_meeting(session_id: str, payload: dict = Body(...)) -> dict:
         session = session_manager.create_session()
         session = session_manager.register_recovered_session(session_id, session)
         session.transcript = [
-            type("Segment", (), {
-                "id": seg.get("id", ""),
-                "speaker": seg.get("speaker", "发言人"),
-                "text": seg.get("text", ""),
-                "start_time": float(seg.get("start_time", seg.get("start", 0.0))),
-                "end_time": float(seg.get("end_time", seg.get("end", 0.0))),
-            })()
+            TranscriptSegment(
+                id=seg.get("id", ""),
+                speaker=seg.get("speaker", "Voice"),
+                text=seg.get("text", ""),
+                start_time=float(seg.get("start_time", seg.get("start", 0.0))),
+                end_time=float(seg.get("end_time", seg.get("end", 0.0))),
+                capture_start_time=float(
+                    seg.get("capture_start_time", seg.get("start_time", seg.get("start", 0.0)))
+                ),
+                capture_duration=float(
+                    seg.get(
+                        "capture_duration",
+                        max(
+                            float(seg.get("end_time", seg.get("end", 0.0)))
+                            - float(seg.get("start_time", seg.get("start", 0.0))),
+                            0.0,
+                        ),
+                    )
+                ),
+            )
             for seg in meeting.get("transcript", [])
         ]
         session.chat_history = [
-            type("Msg", (), {
-                "id": msg.get("id", ""),
-                "role": msg.get("role", "user"),
-                "content": msg.get("content", ""),
-            })()
+            ChatMessage(
+                id=msg.get("id", ""),
+                role=msg.get("role", "user"),
+                content=msg.get("content", ""),
+            )
             for msg in meeting.get("chat_history", [])
         ]
         summary_text = (meeting.get("summary") or "").strip()
@@ -335,6 +355,7 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    await ws_handler.shutdown_workers()
     shutdown = getattr(asr_service, "shutdown", None)
     if callable(shutdown):
         await shutdown()
@@ -357,6 +378,19 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 app.state.STATIC_DIR = STATIC_DIR
+
+# ── SPA catch-all ─────────────────────────────────────────────────────────────────
+from fastapi.responses import FileResponse
+
+@app.get("/{path:path}")
+async def serve_spa(path: str):
+    """Serve index.html for client-side routing."""
+    if path.startswith("api/") or path.startswith("static/") or path in ("docs", "openapi.json", "redoc"):
+        raise HTTPException(status_code=404, detail="Not found")
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return {"message": "Meeting Realtime Voice API", "docs": "/docs"}
 
 # ── Inject refs into handler modules ──────────────────────────────────────────
 
