@@ -42,7 +42,7 @@ class RealtimeMeetingTranscriber:
         sample_rate: int = 16000,
         config: Optional[RealtimeTranscriptionConfig] = None,
     ):
-        self._transcribe_wav = transcribe_wav
+        self._transcribe_fn = transcribe_wav
         self.sample_rate = sample_rate
         self.config = config or RealtimeTranscriptionConfig()
 
@@ -155,7 +155,7 @@ class RealtimeMeetingTranscriber:
         return events
 
     async def _transcribe_wav(self, pcm_data: bytes) -> ASRResult:
-        return await self._transcribe_wav(
+        return await self._transcribe_fn(
             pcm16le_to_audio_tuple(pcm_data, sample_rate=self.sample_rate)
         )
 
@@ -246,7 +246,7 @@ class TransformerAudioChunker:
                 if committed_bytes <= 0:
                     break
 
-                self._buffer = bytearray(self._buffer[committed_bytes:])
+                del self._buffer[:committed_bytes]
                 self._counted_prefix_bytes = 0
                 if not self._buffer:
                     break
@@ -271,8 +271,7 @@ class TransformerAudioChunker:
                 self._align_pcm_bytes(int(self.config.overlap_sec * self._bytes_per_second)),
                 boundary,
             )
-            remaining = self._buffer[boundary - overlap_bytes:]
-            self._buffer = bytearray(remaining)
+            del self._buffer[:boundary - overlap_bytes]
             self._counted_prefix_bytes = overlap_bytes
 
             if not self._buffer:

@@ -3,7 +3,8 @@ ASR module - re-exports all types and classes for backward compatibility.
 
 The actual implementation is split across:
 - asr_types.py     : shared dataclass types
-- asr_service.py    : ASRService (model loading and inference)
+- asr_service.py    : ASRService (MLX model loading and inference)
+- asr_utils.py     : ASR output parsing utilities (vendored from qwen_asr)
 - vad.py           : WebRTCVADMeetingTranscriber (VAD-based realtime)
 - chunker.py       : TransformerAudioChunker, SemanticMeetingTranscriber, RealtimeMeetingTranscriber
 """
@@ -42,17 +43,10 @@ class FinalOnlyASRRouter(BaseASRRouter):
         self._final_service: ASRService = final_service
         self._language_getter = language_getter
         self._context_getter = context_getter
-        # Tracks the last finalized segment's text for dynamic context window
-        self._previous_segment_text: str = ""
 
     def _build_context(self) -> str | None:
-        """Combine static prompt and previous segment text as dynamic context."""
+        """Return the user-supplied static ASR prompt, if any."""
         static = self._context_getter() or ""
-        prev = self._previous_segment_text
-        if prev:
-            # Append previous segment text to give ASR continuity context
-            combined = (static + "\n" + prev).strip()
-            return combined if combined else None
         return static if static else None
 
     async def transcribe_final(self, audio_tuple) -> LiteASRResult:
@@ -61,14 +55,13 @@ class FinalOnlyASRRouter(BaseASRRouter):
             audio_tuple,
             language=self._language_getter(),
             context=context,
+            extract_timestamps=False,
         )
         text = (result.text or "").strip()
-        # Update previous segment text for the next segment's context
-        if text:
-            self._previous_segment_text = text
         return LiteASRResult(
             text=text,
             duration_sec=float(getattr(result, "audio_duration", 0.0) or 0.0),
+            processing_time=float(getattr(result, "processing_time", 0.0) or 0.0),
         )
 
 
@@ -76,6 +69,10 @@ class FinalOnlyASRRouter(BaseASRRouter):
 from asr_service import ASRService, ASRServiceError
 from config import WebRTCVADConfig
 from vad import WebRTCVADMeetingTranscriber
+from vad import SileroVADTranscriber
+from config import SileroVADConfig, NoiseSuppressionConfig, AGCConfig
+from agc import AGCProcessor
+from audio_preprocessor import AudioPreprocessor
 
 # Re-export chunkers
 from chunker import (
@@ -105,6 +102,14 @@ __all__ = [
     # VAD
     "WebRTCVADMeetingTranscriber",
     "WebRTCVADConfig",
+    # VAD (continued)
+    "SileroVADTranscriber",
+    "SileroVADConfig",
+    # Preprocessing
+    "NoiseSuppressionConfig",
+    "AGCConfig",
+    "AGCProcessor",
+    "AudioPreprocessor",
     # Chunkers
     "RealtimeMeetingTranscriber",
     "SemanticMeetingTranscriber",

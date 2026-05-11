@@ -53,6 +53,8 @@ def make_realtime_event(
     cut_reason: str,
     start_time: float = 0.0,
     end_time: float = 0.6,
+    capture_start_time: float = 0.0,
+    capture_duration: float = 0.6,
     processing_time: float = 0.01,
 ):
     return server.RealtimeTranscriptEvent(
@@ -60,6 +62,8 @@ def make_realtime_event(
         text=text,
         start_time=start_time,
         end_time=end_time,
+        capture_start_time=capture_start_time,
+        capture_duration=capture_duration,
         processing_time=processing_time,
         segment_id=segment_id,
         revision=revision,
@@ -137,7 +141,7 @@ class ServerWebSocketTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.object(server, "asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
+                 patch.object(server, "build_realtime_transcriber", return_value=(fake_transcriber, type("FakePreprocessor", (), {"process": lambda self, x: x})()), create=True), \
                  patch.object(server.session_manager, "create_session", return_value=session), \
                  patch.object(server.meeting_store, "complete_session"), \
                  patch.object(server, "RECORDINGS_DIR", Path(tmpdir)):
@@ -160,6 +164,8 @@ class ServerWebSocketTests(unittest.TestCase):
         self.assertEqual(transcript["segment"]["segment_id"], 1)
         self.assertEqual(transcript["segment"]["revision"], 1)
         self.assertTrue(transcript["segment"]["is_final"])
+        self.assertEqual(transcript["segment"]["capture_start_time"], 0.0)
+        self.assertEqual(transcript["segment"]["capture_duration"], 0.6)
         self.assertEqual(done["phase"], "final")
         self.assertTrue(done["is_final"])
 
@@ -184,7 +190,7 @@ class ServerWebSocketTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             recording_dir = Path(tmpdir)
             with patch.object(server, "asr_service", make_fake_asr_service(initialized=True)), \
-                 patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
+                 patch.object(server, "build_realtime_transcriber", return_value=(fake_transcriber, type("FakePreprocessor", (), {"process": lambda self, x: x})()), create=True), \
                  patch.object(server.session_manager, "create_session", return_value=session), \
                  patch.object(server.meeting_store, "complete_session"), \
                  patch.object(server, "RECORDINGS_DIR", recording_dir):
@@ -248,7 +254,7 @@ class ServerWebSocketTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             recording_dir = Path(tmpdir)
             with patch.object(server, "asr_service", fake_asr), \
-                 patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
+                 patch.object(server, "build_realtime_transcriber", return_value=(fake_transcriber, type("FakePreprocessor", (), {"process": lambda self, x: x})()), create=True), \
                  patch.object(server.meeting_store, "complete_session"), \
                  patch.object(server, "RECORDINGS_DIR", recording_dir):
                 with TestClient(server.app) as client:
@@ -319,7 +325,7 @@ class ServerWebSocketTests(unittest.TestCase):
                 ]
             )
             with patch.object(server, "asr_service", fake_asr), \
-                 patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
+                 patch.object(server, "build_realtime_transcriber", return_value=(fake_transcriber, type("FakePreprocessor", (), {"process": lambda self, x: x})()), create=True), \
                  patch.object(server, "RECORDINGS_DIR", recording_dir), \
                  patch.object(server.meeting_store, "complete_session"):
                 with TestClient(server.app) as client:
@@ -393,7 +399,7 @@ class ServerWebSocketTests(unittest.TestCase):
         )
 
         with patch.object(server, "asr_service", fake_asr), \
-             patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
+             patch.object(server, "build_realtime_transcriber", return_value=(fake_transcriber, type("FakePreprocessor", (), {"process": lambda self, x: x})()), create=True), \
              patch.object(server.meeting_store, "complete_session"):
             with TestClient(server.app) as client:
                 with client.websocket_connect("/ws/meeting") as websocket:
@@ -419,7 +425,7 @@ class ServerWebSocketTests(unittest.TestCase):
         fake_transcriber = FakeRealtimeTranscriber()
 
         with patch.object(server, "asr_service", fake_asr), \
-             patch.object(server, "build_realtime_transcriber", return_value=fake_transcriber, create=True), \
+             patch.object(server, "build_realtime_transcriber", return_value=(fake_transcriber, type("FakePreprocessor", (), {"process": lambda self, x: x})()), create=True), \
              patch.object(server.meeting_store, "complete_session"):
             with TestClient(server.app) as client:
                 with client.websocket_connect("/ws/meeting") as websocket:
@@ -452,7 +458,7 @@ class ServerWebSocketTests(unittest.TestCase):
 
         def build_fake_transcriber(session_state):
             fake_transcriber.session_state = session_state
-            return fake_transcriber
+            return fake_transcriber, type("FakePreprocessor", (), {"process": lambda self, x: x})()
 
         with patch.object(server, "asr_service", fake_asr), \
              patch.object(server, "build_realtime_transcriber", side_effect=build_fake_transcriber, create=True), \

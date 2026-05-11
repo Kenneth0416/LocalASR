@@ -74,3 +74,91 @@ button {
   background: var(--border);
   border-radius: 3px;
 }
+
+/* Transcript segment slide-up animation */
+@keyframes slideUpFade {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.transcript-segment-enter {
+  animation: slideUpFade 150ms ease-out;
+}
+
+/* Streaming cursor blink animation */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ASR processing pulse animation */
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.asr-pulse {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* Transcript edit button - hover/focus visible */
+.transcript-row:hover .edit-btn,
+.transcript-row:focus-within .edit-btn {
+  opacity: 1;
+}
+
+.edit-btn {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+/* New transcript floating button */
+.new-transcript-btn {
+  position: absolute;
+  bottom: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 16px;
+  border-radius: 20px;
+  background: var(--accent);
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  z-index: 10;
+  animation: slideUpFade 150ms ease-out;
+}
+
+/* Tab buttons */
+.tab-btn {
+  padding: 8px 20px;
+  border-radius: 8px 8px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.tab-btn.active {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+/* Responsive: < 900px - AI tab becomes single column */
+@media (max-width: 899px) {
+  .ai-tab-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

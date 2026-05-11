@@ -17,7 +17,7 @@ import server
 
 class SessionManagerRecoveryTests(unittest.TestCase):
     def setUp(self):
-        self.llm_config = LLMConfig(provider="ollama", local_only=True)
+        self.llm_config = LLMConfig(provider="llamacpp", local_only=True)
         self.meeting_config = MeetingConfig()
         self.manager = SessionManager(self.llm_config, self.meeting_config)
 

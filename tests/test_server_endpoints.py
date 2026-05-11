@@ -64,6 +64,8 @@ class ServerEndpointTests(unittest.TestCase):
                 text="我们决定在周五上线。",
                 start_time=0.0,
                 end_time=3.2,
+                capture_start_time=0.0,
+                capture_duration=3.6,
                 timestamp="2026-04-07T12:00:01",
             ),
             ordinal=1,
@@ -233,14 +235,21 @@ class ServerEndpointTests(unittest.TestCase):
         self.assertEqual(events, ["initialize", "refresh"])
 
     def test_build_realtime_transcriber_uses_final_only_router(self):
+        from audio_preprocessor import AudioPreprocessor
+
         fake_router = object()
         fake_transcriber = object()
+        fake_preprocessor = object()
 
         with patch.object(server, "FinalOnlyASRRouter", return_value=fake_router) as final_only_router, \
-             patch.object(server, "WebRTCVADMeetingTranscriber", return_value=fake_transcriber) as transcriber_ctor:
-            result = server.build_realtime_transcriber({"language": "zh", "asr_prompt": "ctx"})
+             patch.object(server, "WebRTCVADMeetingTranscriber", return_value=fake_transcriber) as transcriber_ctor, \
+             patch("audio_preprocessor.AudioPreprocessor", return_value=fake_preprocessor), \
+             patch.object(server, "noise_suppression_config", type("C", (), {"enabled": False})()), \
+             patch.object(server, "agc_config", type("C", (), {"enabled": False})()):
+            transcriber, preprocessor = server.build_realtime_transcriber({"language": "zh", "asr_prompt": "ctx"})
 
-        self.assertIs(result, fake_transcriber)
+        self.assertIs(transcriber, fake_transcriber)
+        self.assertIs(preprocessor, fake_preprocessor)
         final_only_router.assert_called_once()
         args, kwargs = final_only_router.call_args
         self.assertIs(args[0], server.asr_service)
@@ -380,6 +389,8 @@ class ServerEndpointTests(unittest.TestCase):
                     meeting = response.json()
                     self.assertEqual(meeting["summary"], "会议确定周五上线。")
                     self.assertEqual(len(meeting["transcript"]), 1)
+                    self.assertEqual(meeting["transcript"][0]["capture_start_time"], 0.0)
+                    self.assertEqual(meeting["transcript"][0]["capture_duration"], 3.6)
 
                     response = client.get("/api/meetings/meeting-001/export.md")
                     self.assertEqual(response.status_code, 200)

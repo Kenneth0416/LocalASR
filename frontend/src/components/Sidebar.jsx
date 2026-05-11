@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Mic, Upload, Library, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, Mic, Upload, Library, Sun, Moon, Settings } from 'lucide-react';
 
 const navItems = [
   { id: 'dashboard', label: '首頁', path: '/', icon: LayoutDashboard },
   { id: 'meeting', label: '直播會議室', path: '/live', icon: Mic },
   { id: 'upload', label: '上傳轉錄', path: '/upload', icon: Upload },
   { id: 'library', label: '會議紀錄庫', path: '/library', icon: Library },
+  { id: 'templates', label: '模板管理', path: '/templates', icon: Settings },
 ];
 
 export default function Sidebar() {

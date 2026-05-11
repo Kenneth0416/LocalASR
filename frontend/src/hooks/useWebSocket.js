@@ -13,6 +13,9 @@ export default function useWebSocket() {
   const [chatMessages, setChatMessages] = useState([]);
   const [summary, setSummary] = useState('');
   const [error, setError] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [lastProcessingTime, setLastProcessingTime] = useState(null);
+  const processingTimerRef = useRef(null);
 
   const wsRef = useRef(null);
   const reconnectCountRef = useRef(0);
@@ -77,6 +80,13 @@ export default function useWebSocket() {
           }
           return [...prev, msg.segment];
         });
+        setIsProcessing(true);
+        if (processingTimerRef.current) {
+          clearTimeout(processingTimerRef.current);
+        }
+        processingTimerRef.current = setTimeout(() => {
+          setIsProcessing(false);
+        }, 5000);
         break;
       case 'chat_stream_start':
         setChatMessages((prev) => [...prev, { role: 'assistant', content: '', message_id: msg.message_id, streaming: true }]);
@@ -86,7 +96,7 @@ export default function useWebSocket() {
           const next = [...prev];
           const last = next[next.length - 1];
           if (last && last.streaming) {
-            last.content += msg.delta;
+            next[next.length - 1] = { ...last, content: last.content + msg.delta };
           }
           return next;
         });
@@ -110,9 +120,19 @@ export default function useWebSocket() {
       case 'error':
         setError(msg.message);
         break;
+      case 'transcribe_done':
+        setIsProcessing(false);
+        if (msg.processing_time != null) {
+          setLastProcessingTime(msg.processing_time);
+        }
+        if (processingTimerRef.current) {
+          clearTimeout(processingTimerRef.current);
+          processingTimerRef.current = null;
+        }
+        break;
       case 'stopped':
         setIsRecording(false);
-        stopAudioCaptureRef();
+        stopAudioCaptureRef.current();
         break;
       case 'pong':
         break;
@@ -164,9 +184,11 @@ export default function useWebSocket() {
     wsRef.current.send(JSON.stringify({ type: 'chat', question }));
   }, []);
 
-  const sendSummary = useCallback(() => {
+  const sendSummary = useCallback((templateId) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ type: 'summary' }));
+    const msg = { type: 'summary' };
+    if (templateId) msg.template_id = templateId;
+    wsRef.current.send(JSON.stringify(msg));
   }, []);
 
   const sendAudio = useCallback((audioData) => {
@@ -211,6 +233,7 @@ export default function useWebSocket() {
 
   const disconnect = useCallback(() => {
     clearInterval(pingTimerRef.current);
+    clearTimeout(processingTimerRef.current);
     stopAudioCaptureRefFn();
     if (wsRef.current) {
       wsRef.current.close();
@@ -228,9 +251,12 @@ export default function useWebSocket() {
     isRecording,
     sessionId,
     transcript,
+    setTranscript,
     chatMessages,
     summary,
     error,
+    isProcessing,
+    lastProcessingTime,
     connect,
     disconnect,
     startMeeting,

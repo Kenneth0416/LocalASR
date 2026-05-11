@@ -31,13 +31,15 @@ from asr import (
     RealtimeTranscriptEvent,
     WebRTCVADMeetingTranscriber,
 )
+from upload_tasks import UploadTaskTracker
 from persistence import MeetingStore
 from runtime_checks import build_runtime_snapshot
 from session import ChatMessage, MeetingSession, MeetingSummary, SessionManager, TranscriptSegment
 from server_app import app, get_configs, get_app
 
 # Re-export configs from server_app
-(llm_config, asr_config, realtime_vad_config, server_config, meeting_config) = get_configs()
+(llm_config, asr_config, realtime_vad_config, server_config, meeting_config,
+ noise_suppression_config, agc_config, silero_vad_config, vad_backend) = get_configs()
 
 # Configure logging
 logging.basicConfig(
@@ -51,6 +53,7 @@ asr_service = ASRService(asr_config)
 meeting_store = MeetingStore(server_config.database_path)
 session_manager = SessionManager(llm_config, meeting_config)
 session_manager.store = meeting_store
+upload_task_tracker = UploadTaskTracker()
 
 cached_llm_status = "unknown"
 SUPPORTED_PYTHON_SERIES = {(3, 11), (3, 12)}
@@ -77,18 +80,67 @@ def build_transformer_chunking_config(config):
     )
 
 
-def build_realtime_transcriber(session_state: dict) -> WebRTCVADMeetingTranscriber:
-    """Build the realtime VAD transcriber with a final-only ASR router."""
+def build_realtime_transcriber(session_state: dict):
+    """Build the realtime transcriber and preprocessor."""
+    from audio_preprocessor import AudioPreprocessor
+
     router = FinalOnlyASRRouter(
         asr_service,
         language_getter=lambda: session_state.get("language"),
         context_getter=lambda: session_state.get("asr_prompt"),
     )
-    return WebRTCVADMeetingTranscriber(
-        router=router,
-        sample_rate=asr_config.sample_rate,
-        config=realtime_vad_config,
+
+    # Select VAD backend
+    if vad_backend == "silero":
+        try:
+            from vad import SileroVADTranscriber
+            transcriber = SileroVADTranscriber(
+                router=router,
+                sample_rate=asr_config.sample_rate,
+                config=silero_vad_config,
+            )
+        except RuntimeError as e:
+            logger.warning("Silero VAD unavailable, falling back to WebRTC: %s", e)
+            transcriber = WebRTCVADMeetingTranscriber(
+                router=router,
+                sample_rate=asr_config.sample_rate,
+                config=realtime_vad_config,
+            )
+    else:
+        transcriber = WebRTCVADMeetingTranscriber(
+            router=router,
+            sample_rate=asr_config.sample_rate,
+            config=realtime_vad_config,
+        )
+
+    # Build preprocessing chain
+    ns_processor = None
+    if noise_suppression_config.enabled:
+        try:
+            from noise_suppression import RNNoiseProcessor
+            ns_processor = RNNoiseProcessor(
+                sample_rate=asr_config.sample_rate,
+                library_path=noise_suppression_config.library_path,
+            )
+            logger.info("RNNoise noise suppression enabled")
+        except RuntimeError as e:
+            logger.warning("RNNoise unavailable, disabling noise suppression: %s", e)
+
+    agc_processor = None
+    if agc_config.enabled:
+        from agc import AGCProcessor
+        agc_processor = AGCProcessor(
+            config=agc_config,
+            sample_rate=asr_config.sample_rate,
+        )
+        logger.info("AGC enabled (target=%.1f dB)", agc_config.target_rms_db)
+
+    preprocessor = AudioPreprocessor(
+        noise_suppression=ns_processor,
+        agc=agc_processor,
     )
+
+    return transcriber, preprocessor
 
 
 # ── Status helpers ──────────────────────────────────────────────────────────────
@@ -103,7 +155,7 @@ def get_runtime_warnings() -> list[str]:
             "Python 3.11/3.12 is the supported runtime for release builds; newer versions are best-effort only."
         )
 
-    if asr_config.device in {"auto", "mps"} and python_series >= (3, 13):
+    if python_series >= (3, 13):
         warnings.append(
             "MPS + Python 3.13+ has shown unstable model loading; prefer Python 3.11/3.12 or switch ASR_DEVICE=cpu."
         )
@@ -148,18 +200,37 @@ def get_llm_status(timeout_sec: float = 3.0) -> str:
         if llm_config.local_only and not llm_config.is_local_provider():
             return f"blocked: local-only mode forbids provider '{llm_config.provider}'"
 
-        if llm_config.is_openai_compatible():
-            resp = requests.get(
-                f"{llm_config.base_url}/models",
-                headers={"Authorization": f"Bearer {llm_config.openai_api_key}"},
-                timeout=timeout_sec,
-            )
-            return "ok" if resp.ok else f"error: {resp.status_code}"
-
-        resp = requests.get(f"{llm_config.ollama_base_url}/api/tags", timeout=timeout_sec)
+        # Both llamacpp and openai use the OpenAI-compatible /v1/models endpoint
+        resp = requests.get(
+            f"{llm_config.base_url}/v1/models",
+            headers={"Authorization": f"Bearer {llm_config.api_key}"},
+            timeout=timeout_sec,
+        )
         return "ok" if resp.ok else f"error: {resp.status_code}"
     except Exception as e:
         return f"unreachable: {e}"
+
+
+async def warmup_llm() -> None:
+    """Send a minimal request to pre-warm the LLM server (KV cache allocation)."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{llm_config.base_url}/v1/chat/completions",
+                json={
+                    "model": llm_config.model_name,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                    "temperature": 0.0,
+                },
+            )
+            if resp.status_code == 200:
+                logger.info("LLM warmup completed")
+            else:
+                logger.warning(f"LLM warmup returned status {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"LLM warmup failed (non-fatal): {e}")
 
 
 def refresh_runtime_snapshot(llm_status: str | None = None):
@@ -246,9 +317,16 @@ def build_meeting_markdown(meeting: dict) -> str:
     return "\n".join(parts).strip() + "\n"
 
 
-async def regenerate_meeting_summary(session_id: str) -> dict:
+async def regenerate_meeting_summary(session_id: str, template_id: str | None = None) -> dict:
     meeting = get_meeting_or_404(session_id)
     temp_session = MeetingSession(f"{session_id}-summary", llm_config, meeting_config)
+
+    # Load template if provided
+    if template_id:
+        template = meeting_store.get_template(template_id)
+        if template:
+            temp_session.template = template
+
     for segment in meeting.get("transcript", []):
         temp_session.add_transcript_segment(
             speaker=str(segment.get("speaker", "Voice")),
@@ -268,12 +346,15 @@ async def regenerate_meeting_summary(session_id: str) -> dict:
     if not summary:
         raise HTTPException(status_code=400, detail="Not enough transcript to generate summary")
 
+    used_template_id = temp_session.template.get("id") if temp_session.template else None
     meeting_store.upsert_summary(
         session_id,
         meeting.get("created_at") or datetime.now().isoformat(),
         summary,
         temp_session.summary.updated_at if temp_session.summary else datetime.now().isoformat(),
         len(temp_session.transcript),
+        template_id=used_template_id,
+        last_summarized_ordinal=len(temp_session.transcript),
     )
     return get_meeting_or_404(session_id)
 
@@ -285,10 +366,27 @@ async def chat_on_meeting(session_id: str, payload: dict = Body(...)) -> dict:
         raise HTTPException(status_code=400, detail="question is required")
 
     meeting = get_meeting_or_404(session_id)
+    session, created_by_us = _rehydrate_session(session_id, meeting)
+
+    try:
+        answer = await session.ask_llm(question)
+        return {"answer": answer}
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+    finally:
+        if created_by_us:
+            session_manager.delete_session(session_id)
+
+
+def _rehydrate_session(session_id: str, meeting: dict) -> tuple[MeetingSession, bool]:
+    """Restore a MeetingSession from persisted meeting data. Returns (session, created_by_us)."""
     session = session_manager.get_session(session_id)
+    created_by_us = False
     if session is None:
         session = session_manager.create_session()
         session = session_manager.register_recovered_session(session_id, session)
+        created_by_us = True
         session.transcript = [
             TranscriptSegment(
                 id=seg.get("id", ""),
@@ -327,14 +425,33 @@ async def chat_on_meeting(session_id: str, payload: dict = Body(...)) -> dict:
                 updated_at=str(meeting.get("summary_updated_at") or datetime.now().isoformat()),
                 turn_count=int(meeting.get("summary_turn_count") or 0),
             )
+        session.last_summarized_ordinal = int(meeting.get("last_summarized_ordinal") or 0)
         session.state = {"language": meeting.get("language", None)}
+    return session, created_by_us
+
+
+async def chat_on_meeting_stream(session_id: str, question: str):
+    """Stream AI answer for a meeting via SSE. Returns an async generator of SSE data lines."""
+    import json
+
+    meeting = get_meeting_or_404(session_id)
+    session, created_by_us = _rehydrate_session(session_id, meeting)
 
     try:
-        answer = await session.ask_llm(question)
-        return {"answer": answer}
+        full_answer = []
+        async for delta in session.stream_llm_answer(question):
+            full_answer.append(delta)
+            yield f"data: {json.dumps({'delta': delta})}\n\n"
+        answer_text = "".join(full_answer)
+        session.add_chat_message("user", question)
+        session.add_chat_message("assistant", answer_text)
+        yield f"data: {json.dumps({'done': True, 'answer': answer_text})}\n\n"
     except Exception as e:
-        logger.error(f"Chat error: {e}")
-        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+        logger.error(f"Streaming chat error: {e}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    finally:
+        if created_by_us:
+            session_manager.delete_session(session_id)
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -342,6 +459,7 @@ async def chat_on_meeting(session_id: str, payload: dict = Body(...)) -> dict:
 
 @app.on_event("startup")
 async def on_startup():
+    meeting_store.init_preset_templates()
     for warning in get_runtime_warnings():
         logger.warning(warning)
     initialize = getattr(asr_service, "initialize", None)
@@ -351,11 +469,20 @@ async def on_startup():
     snapshot = refresh_runtime_snapshot(llm_status=llm_status)
     for warning in snapshot.warnings:
         logger.warning(warning)
+    if llm_status == "ok":
+        await warmup_llm()
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    await upload_task_tracker.shutdown()
     await ws_handler.shutdown_workers()
+    # Cancel any spawned HTTP tasks (e.g. summary generation)
+    for task in http_endpoints._spawned_tasks:
+        task.cancel()
+    if http_endpoints._spawned_tasks:
+        await asyncio.gather(*http_endpoints._spawned_tasks, return_exceptions=True)
+    http_endpoints._spawned_tasks.clear()
     shutdown = getattr(asr_service, "shutdown", None)
     if callable(shutdown):
         await shutdown()
@@ -376,6 +503,9 @@ if not RECORDINGS_DIR.is_absolute():
 if STATIC_DIR.exists():
     from fastapi.staticfiles import StaticFiles
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    assets_dir = STATIC_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
 app.state.STATIC_DIR = STATIC_DIR
 
@@ -419,6 +549,8 @@ http_endpoints._inject(
     build_transcript_text=build_transcript_text,
     regenerate_meeting_summary=regenerate_meeting_summary,
     chat_on_meeting_impl=chat_on_meeting,
+    chat_on_meeting_stream_impl=chat_on_meeting_stream,
+    upload_task_tracker=upload_task_tracker,
 )
 
 # ── SPA catch-all (MUST be after all API route registrations) ─────────────────
@@ -426,9 +558,13 @@ from fastapi.responses import FileResponse
 
 @app.get("/{path:path}")
 async def serve_spa(path: str):
-    """Serve index.html for client-side routing."""
+    """Serve index.html for client-side routing; serve static files that exist on disk."""
     if path.startswith("api/") or path.startswith("static/") or path in ("docs", "openapi.json", "redoc"):
         raise HTTPException(status_code=404, detail="Not found")
+    # Serve files that exist in STATIC_DIR (e.g. audio-worklet.js from Vite public/)
+    static_file = STATIC_DIR / path
+    if static_file.is_file() and ".." not in path:
+        return FileResponse(str(static_file))
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
         return FileResponse(str(index_path))
@@ -441,7 +577,7 @@ async def serve_spa(path: str):
 def main():
     logger.info(f"Starting Meeting Realtime Voice Server...")
     logger.info(f"ASR Model: {asr_config.model_path}")
-    logger.info(f"ASR Device: {asr_config.device}")
+    logger.info(f"ASR Backend: {asr_config.backend}")
     logger.info(f"LLM Provider: {llm_config.provider}")
     logger.info(f"LLM Model: {llm_config.model_name}")
     logger.info(f"Server: {server_config.host}:{server_config.port}")

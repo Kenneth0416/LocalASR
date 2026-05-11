@@ -1,8 +1,20 @@
 export function formatDuration(seconds) {
-  if (!seconds || seconds < 0) return '0:00';
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
+  if (seconds == null || seconds < 0) return '0:00';
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  }
   return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+export function formatTimeRange(start, end) {
+  if (end != null && end > start) {
+    return `${formatDuration(start)} – ${formatDuration(end)}`;
+  }
+  return formatDuration(start);
 }
 
 export function formatDate(isoString) {

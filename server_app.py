@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import load_config
 
-_llm_config, _asr_config, _realtime_vad_config, _server_config, _meeting_config = load_config()
+_llm_config, _asr_config, _realtime_vad_config, _server_config, _meeting_config, _noise_suppression_config, _agc_config, _silero_vad_config, _vad_backend = load_config()
 
 app = FastAPI(title="Meeting Realtime Voice")
 
@@ -37,4 +37,8 @@ def get_configs():
         _realtime_vad_config,
         _server_config,
         _meeting_config,
+        _noise_suppression_config,
+        _agc_config,
+        _silero_vad_config,
+        _vad_backend,
     )

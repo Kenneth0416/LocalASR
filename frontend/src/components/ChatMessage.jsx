@@ -1,4 +1,5 @@
 import { User, Bot } from 'lucide-react';
+import MarkdownRenderer from './MarkdownRenderer';
 
 export default function ChatMessage({ message }) {
   const isUser = message.role === 'user';
@@ -21,9 +22,13 @@ export default function ChatMessage({ message }) {
         <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>
           {isUser ? 'You' : 'AI Assistant'}
         </div>
-        <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
-          {message.content}
-        </div>
+        {isUser ? (
+          <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
+            {message.content}
+          </div>
+        ) : (
+          <MarkdownRenderer>{message.content}</MarkdownRenderer>
+        )}
       </div>
     </div>
   );

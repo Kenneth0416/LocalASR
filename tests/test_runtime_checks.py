@@ -9,6 +9,13 @@ from runtime_checks import build_runtime_snapshot, _is_parent_writable
 
 
 class RuntimeChecksTests(unittest.TestCase):
+    @patch.dict("os.environ", {}, clear=True)
+    def test_webrtc_vad_defaults_to_720ms_endpoint(self):
+        _, _, vad, _, _ = load_config()
+
+        self.assertEqual(vad.frame_ms, 20)
+        self.assertEqual(vad.endpoint_silence_frames, 36)
+
     @patch.dict(
         "os.environ",
         {
@@ -20,7 +27,7 @@ class RuntimeChecksTests(unittest.TestCase):
     )
     def test_openai_api_key_alone_does_not_flip_local_only_provider(self):
         llm, _, _, _, _ = load_config()
-        self.assertEqual(llm.provider, "ollama")
+        self.assertEqual(llm.provider, "llamacpp")
         self.assertTrue(llm.local_only)
 
     @patch.dict(
@@ -64,11 +71,11 @@ class RuntimeChecksTests(unittest.TestCase):
     @patch("runtime_checks.os.path.exists", return_value=True)
     @patch("runtime_checks._is_parent_writable", return_value=True)
     @patch("runtime_checks.shutil.which", return_value="/usr/bin/ffmpeg")
-    def test_local_only_ollama_profile_reports_ready_capabilities(self, _which, _writable, _exists):
+    def test_local_only_llamacpp_profile_reports_ready_capabilities(self, _which, _writable, _exists):
         llm = LLMConfig(
-            provider="ollama",
-            ollama_base_url="http://localhost:11434",
-            ollama_model="qwen3.5:9b",
+            provider="llamacpp",
+            llamacpp_base_url="http://localhost:8190",
+            llamacpp_model="qwen3.5:9b",
             local_only=True,
         )
         asr = ASRConfig(model_path="/tmp/asr-model")
@@ -96,7 +103,7 @@ class RuntimeChecksTests(unittest.TestCase):
     @patch("runtime_checks._is_parent_writable", return_value=True)
     @patch("runtime_checks.shutil.which", return_value=None)
     def test_missing_ffmpeg_degrades_transcoded_upload_only(self, _which, _writable, _exists):
-        llm = LLMConfig(provider="ollama", ollama_base_url="http://localhost:11434", local_only=True)
+        llm = LLMConfig(provider="llamacpp", llamacpp_base_url="http://localhost:8190", local_only=True)
         asr = ASRConfig(model_path="/tmp/asr-model")
         server = ServerConfig(host="127.0.0.1")
 
@@ -117,7 +124,7 @@ class RuntimeChecksTests(unittest.TestCase):
     @patch("runtime_checks._is_parent_writable", return_value=True)
     @patch("runtime_checks.shutil.which", return_value=None)
     def test_missing_ffmpeg_does_not_degrade_upload_when_asr_is_unavailable(self, _which, _writable, _exists):
-        llm = LLMConfig(provider="ollama", ollama_base_url="http://localhost:11434", local_only=True)
+        llm = LLMConfig(provider="llamacpp", llamacpp_base_url="http://localhost:8190", local_only=True)
         asr = ASRConfig(model_path="/tmp/asr-model")
         server = ServerConfig(host="127.0.0.1")
 

@@ -70,11 +70,15 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
         finals = [event for event in events if event.is_final]
         self.assertEqual(len(finals), 1)
         self.assertEqual(finals[0].start_time, 0.0)
-        self.assertEqual(finals[0].end_time, 0.16)
+        self.assertEqual(finals[0].end_time, 0.08)
+        self.assertEqual(finals[0].capture_start_time, 0.0)
+        self.assertEqual(finals[0].capture_duration, 0.16)
         self.assertEqual(finals[0].text, "定稿")
 
     async def test_emits_only_one_final_event_after_endpoint(self):
-        router = FakeRouter(final_results=[LiteASRResult(text="最终定稿。", duration_sec=1.4)])
+        router = FakeRouter(
+            final_results=[LiteASRResult(text="最终定稿。", duration_sec=1.4, processing_time=0.42)]
+        )
         decisions = [True] * 70 + [False] * 12
         transcriber = WebRTCVADMeetingTranscriber(
             router=router,
@@ -97,6 +101,7 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0].segment_id, 1)
         self.assertEqual(events[0].revision, 1)
         self.assertEqual(events[0].text, "最终定稿。")
+        self.assertEqual(events[0].processing_time, 0.42)
 
     async def test_final_exception_drops_segment(self):
         class Router:
@@ -184,6 +189,35 @@ class WebRTCVADMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(finals), 1)
         self.assertEqual(finals[0].text, "单帧尾巴")
         self.assertEqual(finals[0].cut_reason, "flush")
+
+    async def test_final_event_tracks_speech_time_separately_from_capture_window(self):
+        router = FakeRouter(
+            final_results=[LiteASRResult(text="带采集窗口", duration_sec=0.14, processing_time=0.12)]
+        )
+        decisions = [False, False, True, True, True, False, False]
+        transcriber = WebRTCVADMeetingTranscriber(
+            router=router,
+            config=WebRTCVADConfig(
+                frame_ms=20,
+                enter_speech_frames=2,
+                endpoint_silence_frames=2,
+                max_utterance_sec=2.0,
+                pre_roll_sec=0.04,
+            ),
+            vad_factory=lambda aggressiveness: FakeVAD(decisions),
+        )
+
+        events = []
+        for _ in range(len(decisions)):
+            events.extend(await transcriber.push_frame(make_pcm((0.02, 1800)), sample_count=320))
+        events.extend(await transcriber.flush())
+
+        finals = [event for event in events if event.is_final]
+        self.assertEqual(len(finals), 1)
+        self.assertAlmostEqual(finals[0].start_time, 0.04, places=2)
+        self.assertAlmostEqual(finals[0].end_time, 0.10, places=2)
+        self.assertAlmostEqual(finals[0].capture_start_time, 0.0, places=2)
+        self.assertAlmostEqual(finals[0].capture_duration, 0.14, places=2)
 
 
 class SemanticMeetingTranscriberTests(unittest.IsolatedAsyncioTestCase):

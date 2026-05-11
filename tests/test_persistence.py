@@ -26,6 +26,8 @@ class MeetingStoreTests(unittest.TestCase):
                     text="第一段内容",
                     start_time=0.0,
                     end_time=2.5,
+                    capture_start_time=0.0,
+                    capture_duration=2.7,
                     timestamp="2026-04-07T10:00:01",
                 ),
                 ordinal=1,
@@ -71,6 +73,8 @@ class MeetingStoreTests(unittest.TestCase):
             self.assertEqual(len(meeting["transcript"]), 1)
             self.assertEqual(len(meeting["chat_history"]), 1)
             self.assertEqual(meeting["recording_path"], str(recording_path))
+            self.assertEqual(meeting["transcript"][0]["capture_start_time"], 0.0)
+            self.assertEqual(meeting["transcript"][0]["capture_duration"], 2.7)
 
             updated_segment = store.update_transcript_segment(
                 session_id,
@@ -81,6 +85,8 @@ class MeetingStoreTests(unittest.TestCase):
             self.assertIsNotNone(updated_segment)
             self.assertEqual(updated_segment["speaker"], "主持人")
             self.assertEqual(updated_segment["text"], "第一段内容（已修订）")
+            self.assertEqual(updated_segment["capture_start_time"], 0.0)
+            self.assertEqual(updated_segment["capture_duration"], 2.7)
 
             meeting = store.get_meeting(session_id)
             self.assertEqual(meeting["transcript"][0]["speaker"], "主持人")
@@ -90,4 +96,3 @@ class MeetingStoreTests(unittest.TestCase):
             self.assertTrue(deleted)
             self.assertIsNone(store.get_meeting(session_id))
             self.assertFalse(recording_path.exists())
-

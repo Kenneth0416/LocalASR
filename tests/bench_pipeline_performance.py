@@ -959,7 +959,7 @@ REPORT_TEMPLATE = """\
 **Host**: {host}
 **Python**: {python_version}
 **NumPy**: {numpy_version}
-**PyTorch**: {torch_version}
+**MLX**: {mlx_version}
 **Platform**: {platform}
 
 ---
@@ -1238,17 +1238,17 @@ async def main():
         numpy_ver = "n/a"
 
     try:
-        import torch as torch_mod
-        torch_ver = torch_mod.__version__
+        import mlx as mlx_mod
+        mlx_ver = mlx_mod.__version__
     except Exception:
-        torch_ver = "n/a"
+        mlx_ver = "n/a"
 
     report = REPORT_TEMPLATE.format(
         timestamp=datetime.now().isoformat(),
         host=platform.node(),
         python_version=sys.version.split()[0],
         numpy_version=numpy_ver,
-        torch_version=torch_ver,
+        mlx_version=mlx_ver,
         platform=platform.platform(),
         n_runs=N_RUNS,
         warmup_runs=WARMUP_RUNS,

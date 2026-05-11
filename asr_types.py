@@ -33,6 +33,7 @@ class ASRResult:
 class LiteASRResult:
     text: str
     duration_sec: float
+    processing_time: float = 0.0
     language: str | None = None
     confidence: float | None = None
 
@@ -51,6 +52,8 @@ class RealtimeTranscriptEvent:
     segment_id: int
     revision: int
     is_final: bool
+    capture_start_time: float = 0.0
+    capture_duration: float = 0.0
     cut_reason: str = "endpoint"
 
 
@@ -96,6 +99,7 @@ class UtteranceState:
     segment_id: int
     revision: int
     start_sample: int
+    capture_start_sample: int
     end_sample: int | None
     last_speech_sample: int
     pcm_buffer: bytearray = field(default_factory=bytearray)

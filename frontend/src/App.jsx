@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard';
 import MeetingRoom from './pages/MeetingRoom';
 import Upload from './pages/Upload';
 import Library from './pages/Library';
+import Templates from './pages/Templates';
 
 function App() {
   return (
@@ -30,6 +31,7 @@ function AppInner() {
         <Route path="/live" element={<MeetingRoom />} />
         <Route path="/upload" element={<Upload />} />
         <Route path="/library" element={<Library />} />
+        <Route path="/templates" element={<Templates />} />
       </Routes>
     </AppShell>
   );

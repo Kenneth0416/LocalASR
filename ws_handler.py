@@ -29,6 +29,20 @@ logger = logging.getLogger("meeting.ws")
 # Global refs injected by server.py before app creation
 _app_refs: dict = {}
 
+# Track active audio_worker tasks for graceful shutdown
+_active_workers: set[asyncio.Task] = set()
+
+# Track fire-and-forget tasks (chat, summary) for cleanup on shutdown
+_spawned_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Create and track a fire-and-forget task."""
+    task = asyncio.create_task(coro)
+    _spawned_tasks.add(task)
+    task.add_done_callback(_spawned_tasks.discard)
+    return task
+
 
 def _inject(
     asr_service,
@@ -60,6 +74,26 @@ def _inject(
         get_llm_status=get_llm_status,
         get_runtime_warnings=get_runtime_warnings,
     )
+
+
+async def shutdown_workers(timeout: float = 10.0) -> None:
+    """Cancel all active audio workers and spawned tasks on shutdown."""
+    if not _active_workers and not _spawned_tasks:
+        return
+    logger.info(
+        "Shutting down %d active audio worker(s) and %d spawned task(s)",
+        len(_active_workers), len(_spawned_tasks),
+    )
+    for task in _active_workers:
+        task.cancel()
+    for task in _spawned_tasks:
+        task.cancel()
+    all_tasks = _active_workers | _spawned_tasks
+    _, pending = await asyncio.wait(all_tasks, timeout=timeout)
+    if pending:
+        logger.warning("%d task(s) did not finish within %.0fs", len(pending), timeout)
+    _active_workers.clear()
+    _spawned_tasks.clear()
 
 
 # ============================================================================
@@ -157,19 +191,29 @@ class SessionAudioRecorder:
 @app.websocket("/ws/meeting")
 async def websocket_meeting(websocket: WebSocket):
     """Main meeting WebSocket - handles both transcription and chat"""
-    _server = sys.modules["server"]
     session_manager = _app_refs["session_manager"]
     asr_config = _app_refs["asr_config"]
     llm_config = _app_refs["llm_config"]
     meeting_config = _app_refs["meeting_config"]
     server_config = _app_refs["server_config"]
     realtime_vad_config = _app_refs["realtime_vad_config"]
-    asr_service = _server.asr_service
+    asr_service = _app_refs["asr_service"]
     meeting_store = _app_refs["meeting_store"]
-    build_realtime_transcriber = _server.build_realtime_transcriber
+    build_realtime_transcriber = _app_refs["build_realtime_transcriber"]
     RECORDINGS_DIR = _app_refs["RECORDINGS_DIR"]
     get_asr_status = _app_refs["get_asr_status"]
     get_runtime_warnings = _app_refs["get_runtime_warnings"]
+
+    # Per-connection spawned tasks (chat, summary) for cleanup on disconnect
+    _conn_tasks: set[asyncio.Task] = set()
+
+    def _spawn_conn(coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        _conn_tasks.add(task)
+        _spawned_tasks.add(task)
+        task.add_done_callback(_conn_tasks.discard)
+        task.add_done_callback(_spawned_tasks.discard)
+        return task
 
     await websocket.accept()
     logger.info("New meeting connection")
@@ -183,7 +227,7 @@ async def websocket_meeting(websocket: WebSocket):
     audio_recorder = SessionAudioRecorder(
         session_id=session.session_id,
         sample_rate=asr_config.sample_rate,
-        output_dir=sys.modules["server"].RECORDINGS_DIR,
+        output_dir=RECORDINGS_DIR,
     )
     audio_worker_task = asyncio.create_task(
         audio_worker(
@@ -192,8 +236,11 @@ async def websocket_meeting(websocket: WebSocket):
             audio_queue,
             session_state,
             audio_recorder,
+            spawn_fn=_spawn_conn,
         )
     )
+    _active_workers.add(audio_worker_task)
+    audio_worker_task.add_done_callback(_active_workers.discard)
     recording_started = False
 
     try:
@@ -201,7 +248,7 @@ async def websocket_meeting(websocket: WebSocket):
         await websocket.send_json({
             "type": "ready",
             "session_id": session.session_id,
-            "asr_device": asr_config.device,
+            "asr_backend": asr_config.backend,
             "asr_ready": asr_status["state"] == "ready",
             "asr_init_timeout_sec": asr_config.init_timeout_sec,
             "asr_model": str(asr_config.model_path),
@@ -230,7 +277,7 @@ async def websocket_meeting(websocket: WebSocket):
                         session_state["asr_prompt"] = str(msg.get("asr_prompt", "") or "").strip() or None
                         await websocket.send_json({
                             "type": "status",
-                            "message": "正在准备转录模型..."
+                            "message": "Preparing transcription model..."
                         })
 
                         try:
@@ -254,7 +301,7 @@ async def websocket_meeting(websocket: WebSocket):
                         recording_started = True
                         await websocket.send_json({
                             "type": "start_ack",
-                            "message": "会议开始，正在转录..."
+                            "message": "Meeting started, transcribing..."
                         })
 
                     elif msg_type in {"stop", "eos"}:
@@ -279,14 +326,11 @@ async def websocket_meeting(websocket: WebSocket):
                     elif msg_type == "chat":
                         question = msg.get("question", "").strip()
                         if question:
-                            asyncio.create_task(
-                                handle_chat(session, question, websocket)
-                            )
+                            _spawn_conn(handle_chat(session, question, websocket))
 
                     elif msg_type == "summary":
-                        asyncio.create_task(
-                            handle_summary_request(session, websocket)
-                        )
+                        template_id = msg.get("template_id") or None
+                        _spawn_conn(handle_summary_request(session, websocket, template_id))
 
                     elif msg_type == "ping":
                         await websocket.send_json({"type": "pong"})
@@ -308,7 +352,7 @@ async def websocket_meeting(websocket: WebSocket):
                     logger.warning("Invalid audio packet: %s", e)
                     await websocket.send_json({
                         "type": "error",
-                        "message": f"音频包格式错误: {e}",
+                        "message": f"Audio packet format error: {e}",
                     })
                     continue
 
@@ -336,7 +380,12 @@ async def websocket_meeting(websocket: WebSocket):
             try:
                 await asyncio.wait_for(
                     audio_worker_task,
-                    timeout=5,
+                    timeout=30,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Session %s: audio worker did not finish within 30s after disconnect; cancelling",
+                    session.session_id,
                 )
             except Exception:
                 logger.debug("Disconnect flush did not finish before timeout", exc_info=True)
@@ -345,6 +394,12 @@ async def websocket_meeting(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}")
 
     finally:
+        # Cancel any spawned tasks (chat, summary) for this connection
+        for task in _conn_tasks:
+            task.cancel()
+        if _conn_tasks:
+            await asyncio.gather(*_conn_tasks, return_exceptions=True)
+
         if not audio_worker_task.done():
             audio_worker_task.cancel()
             try:
@@ -367,35 +422,61 @@ async def audio_worker(
     audio_queue: asyncio.Queue[AudioQueueItem],
     session_state: dict,
     audio_recorder: SessionAudioRecorder,
+    *,
+    spawn_fn=None,
 ):
     """Continuously process queued audio with final transcript updates."""
-    _server = sys.modules["server"]
-    build_realtime_transcriber = _server.build_realtime_transcriber
+    if spawn_fn is None:
+        spawn_fn = _spawn
+    build_realtime_transcriber = _app_refs["build_realtime_transcriber"]
     meeting_config = _app_refs["meeting_config"]
-    meeting_store = _server.meeting_store
+    meeting_store = _app_refs["meeting_store"]
 
-    transcriber = build_realtime_transcriber(session_state)
+    transcriber, preprocessor = build_realtime_transcriber(session_state)
 
+    def _notify_drain():
+        try:
+            audio_queue.put_nowait(AudioQueueItem(event_type="drain"))
+        except asyncio.QueueFull:
+            # Queue is full with audio frames; the next audio or EOS item will
+            # call _drain_finished_tasks anyway, so the completed result won't
+            # be lost — it will be emitted on that next iteration.
+            pass
+
+    transcriber._on_final_done = _notify_drain
+    session._transcriber = transcriber
+    session._audio_queue = audio_queue
+
+    _recording_finalized = False
     try:
         while True:
             item = await audio_queue.get()
             try:
+                if item.event_type == "drain":
+                    events = await transcriber._drain_finished_tasks()
+                    for event in events:
+                        await emit_final_transcript_segment(session, event, websocket, spawn_fn=spawn_fn)
+                        await send_transcribe_done(websocket, event)
+                    continue
+
                 if item.event_type == "audio":
                     pcm_chunk = b"".join(frame.pcm_chunk for frame in item.frames)
                     audio_recorder.append_pcm(pcm_chunk)
+                    pcm_chunk = preprocessor.process(pcm_chunk)
                     events = await transcriber.push_pcm(pcm_chunk)
                     for event in events:
-                        await emit_final_transcript_segment(session, event, websocket)
+                        await emit_final_transcript_segment(session, event, websocket, spawn_fn=spawn_fn)
                         await send_transcribe_done(websocket, event)
                     continue
 
                 if item.event_type == "eos":
                     events = await transcriber.flush(reason=item.reason)
                     for event in events:
-                        await emit_final_transcript_segment(session, event, websocket)
+                        await emit_final_transcript_segment(session, event, websocket, spawn_fn=spawn_fn)
                         await send_transcribe_done(websocket, event)
 
                     recording_path = audio_recorder.finalize()
+                    _recording_finalized = True
                     ended_at = datetime.now().isoformat()
                     meeting_store.complete_session(
                         session.session_id,
@@ -405,11 +486,12 @@ async def audio_worker(
                         recording_bytes=audio_recorder.byte_count,
                         recording_error=audio_recorder.error_message,
                         status="completed" if item.reason == "stop" else "disconnected",
+                        source="live",
                     )
                     if item.reason != "disconnect":
                         await websocket.send_json({
                             "type": "stopped",
-                            "message": "会议结束",
+                            "message": "Meeting ended",
                             "last_seq": item.last_seq,
                             "reason": item.reason,
                             "recording_path": str(recording_path) if recording_path else None,
@@ -420,7 +502,10 @@ async def audio_worker(
             finally:
                 audio_queue.task_done()
     finally:
-        audio_recorder.finalize()
+        if not _recording_finalized:
+            audio_recorder.finalize()
+        session._transcriber = None
+        session._audio_queue = None
 
 
 async def send_transcribe_done(websocket: WebSocket, event: RealtimeTranscriptEvent):
@@ -434,9 +519,11 @@ async def send_transcribe_done(websocket: WebSocket, event: RealtimeTranscriptEv
         "cut_reason": event.cut_reason,
     })
 
-async def emit_final_transcript_segment(session, event: RealtimeTranscriptEvent, websocket: WebSocket):
+async def emit_final_transcript_segment(session, event: RealtimeTranscriptEvent, websocket: WebSocket, *, spawn_fn=None):
     """Persist and broadcast a finalized transcript emission."""
-    meeting_config = sys.modules["server"].meeting_config
+    if spawn_fn is None:
+        spawn_fn = _spawn
+    meeting_config = _app_refs["meeting_config"]
 
     try:
         text = event.text.strip()
@@ -444,10 +531,12 @@ async def emit_final_transcript_segment(session, event: RealtimeTranscriptEvent,
             return
 
         segment = session.add_transcript_segment(
-            speaker="发言人",
+            speaker="Voice",
             text=text,
             start_time=event.start_time,
             end_time=event.end_time,
+            capture_start_time=event.capture_start_time,
+            capture_duration=event.capture_duration,
         )
 
         await websocket.send_json({
@@ -462,20 +551,28 @@ async def emit_final_transcript_segment(session, event: RealtimeTranscriptEvent,
                 "text": segment.text,
                 "start": segment.start_time,
                 "end": segment.end_time,
+                "capture_start_time": segment.capture_start_time,
+                "capture_duration": segment.capture_duration,
             },
             "total_segments": len(session.transcript),
             "processing_time": event.processing_time,
         })
 
         if len(session.transcript) % meeting_config.summary_interval_turns == 0:
-            asyncio.create_task(handle_summary_request(session, websocket))
+            spawn_fn(handle_summary_request(session, websocket))
+
+        # Background rewrite: every 10 new segments, rewrite the latest chunk
+        rewrite_interval = 10
+        unrewritten = len(session.transcript) - session._last_rewritten_idx
+        if unrewritten >= rewrite_interval:
+            spawn_fn(session.rewrite_segments_chunked())
 
     except Exception as e:
         logger.error(f"Audio processing error: {e}", exc_info=True)
         try:
             await websocket.send_json({
                 "type": "error",
-                "message": f"转写失败: {str(e)}"
+                "message": f"Transcription failed: {str(e)}"
             })
         except Exception:
             pass
@@ -490,7 +587,7 @@ async def handle_chat(session, question: str, websocket: WebSocket):
         await websocket.send_json({
             "type": "chat_status",
             "status": "thinking",
-            "message": "AI 思考中..."
+            "message": "AI thinking..."
         })
 
         await websocket.send_json({
@@ -509,7 +606,7 @@ async def handle_chat(session, question: str, websocket: WebSocket):
 
         answer = "".join(answer_parts).strip()
         if not answer:
-            raise RuntimeError("AI 返回了空内容")
+            raise RuntimeError("AI returned empty content")
 
         session.add_chat_message("user", question)
         session.add_chat_message("assistant", answer, message_id=assistant_message_id)
@@ -526,18 +623,25 @@ async def handle_chat(session, question: str, websocket: WebSocket):
         await websocket.send_json({
             "type": "chat_error",
             "message_id": assistant_message_id,
-            "message": f"AI 回答失败: {str(e)}"
+            "message": f"AI answer failed: {str(e)}"
         })
 
 
-async def handle_summary_request(session, websocket: WebSocket):
+async def handle_summary_request(session, websocket: WebSocket, template_id: str | None = None):
     """Update meeting summary - non-blocking"""
     try:
         await websocket.send_json({
             "type": "summary_status",
             "status": "updating",
-            "message": "正在更新摘要..."
+            "message": "Updating summary..."
         })
+
+        # Load template if template_id provided
+        if template_id:
+            meeting_store = _app_refs["meeting_store"]
+            template = meeting_store.get_template(template_id)
+            if template:
+                session.template = template
 
         summary = await session.update_summary()
 
@@ -546,7 +650,15 @@ async def handle_summary_request(session, websocket: WebSocket):
                 "type": "summary_update",
                 "summary": summary,
                 "transcript_count": len(session.transcript),
+                "template_id": template_id or (session.template.get("id") if session.template else None),
             })
 
     except Exception as e:
         logger.error(f"Summary error: {e}")
+        try:
+            await websocket.send_json({
+                "type": "summary_error",
+                "message": f"Summary update failed: {e}",
+            })
+        except Exception:
+            pass

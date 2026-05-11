@@ -67,8 +67,8 @@ def _local_provider_allowed(llm_config: LLMConfig) -> bool:
     if not llm_config.local_only:
         return True
 
-    if llm_config.provider == "ollama":
-        parsed = urlparse(llm_config.ollama_base_url or "")
+    if llm_config.provider == "llamacpp":
+        parsed = urlparse(llm_config.llamacpp_base_url or "")
         return not parsed.hostname or _is_loopback_host(parsed.hostname)
 
     parsed = urlparse(llm_config.openai_base_url or "")
@@ -86,7 +86,7 @@ def build_runtime_snapshot(
 ) -> RuntimeSnapshot:
     warnings: list[str] = []
 
-    asr_model_exists = os.path.exists(asr_config.model_path)
+    asr_model_exists = os.path.exists(asr_config.model_path) or not asr_config.mlx_model_path
     ffmpeg_path = shutil.which("ffmpeg")
     recordings_writable = _is_parent_writable(server_config.recordings_dir)
     database_writable = _is_parent_writable(server_config.database_path)

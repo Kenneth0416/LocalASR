@@ -5,6 +5,7 @@ export function useGet(url, deps = []) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [refetchCount, setRefetchCount] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -14,9 +15,9 @@ export function useGet(url, deps = []) {
       .catch((err) => { if (!cancelled) setError(err); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, deps);
+  }, [refetchCount, ...deps]);
 
-  return { data, loading, error, refetch: () => setData(null) };
+  return { data, loading, error, refetch: () => setRefetchCount((c) => c + 1) };
 }
 
 export function usePost() {

@@ -1,9 +1,10 @@
 import StatusBadge from './StatusBadge';
 import { formatRelativeDate } from '../utils/formatters';
-import { Clock, CheckSquare } from 'lucide-react';
+import { Clock, CheckSquare, Mic, UploadCloud } from 'lucide-react';
 
 export default function MeetingCard({ meeting, onClick }) {
   const status = meeting.status || 'completed';
+  const isUpload = meeting.source === 'upload';
 
   return (
     <div
@@ -18,11 +19,12 @@ export default function MeetingCard({ meeting, onClick }) {
     >
       <div style={{
         width: 36, height: 36, borderRadius: 9,
-        background: 'var(--accent-dim)', color: 'var(--accent)',
+        background: isUpload ? 'var(--green-dim, rgba(52,211,153,0.12))' : 'var(--accent-dim)',
+        color: isUpload ? 'var(--green, #34d399)' : 'var(--accent)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 14, fontWeight: 700, flexShrink: 0,
+        flexShrink: 0,
       }}>
-        {(meeting.title || '?')[0]}
+        {isUpload ? <UploadCloud size={16} /> : <Mic size={16} />}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
@@ -36,7 +38,7 @@ export default function MeetingCard({ meeting, onClick }) {
           </span>
           <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <CheckSquare size={12} />
-            {meeting.transcript?.length || 0} 條記錄
+            {meeting.transcript_count ?? meeting.transcript?.length ?? 0} 條記錄
           </span>
         </div>
       </div>
